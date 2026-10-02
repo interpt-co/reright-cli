@@ -12,7 +12,7 @@ git rev-parse -q --verify "refs/tags/$TAG" >/dev/null || { echo "tag $TAG does n
 [ "$(git rev-parse HEAD)" = "$(git rev-parse "$TAG^{commit}")" ] || { echo "HEAD is not the commit $TAG points at; check out the tag first" >&2; exit 1; }
 
 go test ./...
-scripts/build-release.sh dist/release
+RERIGHT_VERSION="$TAG" scripts/build-release.sh dist/release
 git push origin "$TAG"
 gh release create "$TAG" dist/release/* --title "$TAG" --generate-notes
 echo "published $TAG"

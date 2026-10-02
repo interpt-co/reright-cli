@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -31,8 +32,14 @@ type Env struct {
 	Getenv   func(string) string
 	// ConfigDir holds enforcement.json, the user's on/off switches. Empty means no switches.
 	ConfigDir string
-	// Now is the clock for timed switches. Nil means time.Now.
+	// Now is the clock for timed switches and update notices. Nil means time.Now.
 	Now func() time.Time
+	// Version is the version of this hook. The update notice is off for "dev" and for an empty value.
+	Version string
+	// ReleaseURL is where version.txt is fetched for the update notice. Empty means the official releases.
+	ReleaseURL string
+	// HTTP is the client for that fetch. Nil means a client with a short timeout.
+	HTTP *http.Client
 }
 
 type lock struct {
@@ -78,6 +85,11 @@ func RunAgent(ctx context.Context, agent, sub string, stdin io.Reader, stdout, s
 		}
 		if ad.promptOK != nil {
 			ad.promptOK(stdout)
+		}
+		if ad.notice != nil {
+			if msg := updateNotice(ctx, env); msg != "" {
+				ad.notice(stdout, msg)
+			}
 		}
 	default:
 		fmt.Fprintf(stderr, "reright-hook: unknown subcommand %q (want pre, post or prompt)\n", sub)

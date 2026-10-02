@@ -99,6 +99,21 @@ Install backs up a file the first time. On a later install it compares the file 
 
 The device token still works on the server after uninstall until you revoke the device on the dashboard.
 
+## Upgrading
+
+`reright upgrade` replaces `reright` and `reright-hook` with the newest release. It needs no setup code, because the device already has a token, and it leaves the token and every agent's configuration alone. It downloads `checksums.txt`, `checksums.txt.sig` and `version.txt`, checks the signature against the key compiled into `reright`, checks each program against its signed checksum, and only then replaces them. The hook is replaced first, then `reright` itself, each through a temporary file and a rename. If a check fails nothing changes.
+
+- `reright upgrade --check` only says whether a newer release exists.
+- `reright upgrade --force` replaces the programs even when the release is not newer.
+- A local build (`reright version` says `dev`) is replaced by the release.
+- If `reright-hook` is not installed where the install record says, only `reright` is replaced.
+
+`reright version` and `reright-hook --version` print the version. `reright doctor` shows both and warns when they differ, or when the hook is too old to report a version.
+
+**Update notice.** Once a day, when you submit a prompt in Claude Code, the hook looks at `version.txt` on the latest release. If it names a newer version, Claude Code shows a one line warning with `Run: reright upgrade`, at most once a day for each version. Nothing is installed by the hook. The check takes at most two seconds, fails quietly, and is off when `RERIGHT_NO_UPDATE_CHECK=1` is set. State lives in `~/.local/state/reright/update.json`.
+
+**Server nudge.** The hook sends its version in an `X-Reright-Client` header on every check. A server that has `RERIGHT_CLIENT_LATEST` set answers `X-Reright-Latest` and, for older hooks, `X-Reright-Upgrade: available`. A server with `RERIGHT_CLIENT_MIN` set answers `X-Reright-Upgrade: required` to hooks older than that minimum, and to hooks that send no version. The hook saves the answer in `client-policy.json` next to the other state, and a required upgrade is shown on every prompt until the client is upgraded. The checks themselves keep working.
+
 ## Doctor
 
 `reright doctor` (and `reright doctor --agent NAME`) prints one line per check. The line starts with `ok`, `warn` or `FAIL`. A `FAIL` or `warn` line ends with `Fix: ...`. The exit code is 1 when any check failed. Warnings do not change the exit code.

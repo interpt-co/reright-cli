@@ -40,10 +40,13 @@ type adapter struct {
 	decode   func(raw []byte) (call, error)
 	deny     func(stdout, stderr io.Writer, c call, reason string) int
 	promptOK func(stdout io.Writer)
+	// notice shows the person a one line message when a prompt is submitted. Only agents that have such a
+	// channel set it.
+	notice func(stdout io.Writer, msg string)
 }
 
 var adapters = map[string]adapter{
-	AgentClaude:  {decode: decodeClaude, deny: denyClaude},
+	AgentClaude:  {decode: decodeClaude, deny: denyClaude, notice: claudeNotice},
 	AgentCodex:   {decode: decodeCodex, deny: denyClaude},
 	AgentGemini:  {decode: decodeGemini, deny: denyGemini},
 	AgentCopilot: {decode: decodeCopilot, deny: denyCopilot},

@@ -125,7 +125,9 @@ func get(ctx context.Context, hc *http.Client, u string, limit int64) ([]byte, e
 	return b, nil
 }
 
-func fetchVerified(ctx context.Context, hc *http.Client, baseURL string, pub ed25519.PublicKey, asset string) ([]byte, error) {
+// signedTable downloads checksums.txt and its signature, checks the signature against the compiled-in release
+// key and returns the table of checksums. Nothing listed in it is trusted before this succeeds.
+func signedTable(ctx context.Context, hc *http.Client, baseURL string, pub ed25519.PublicKey) (map[string]string, error) {
 	base := strings.TrimRight(baseURL, "/")
 	sums, err := get(ctx, hc, base+"/"+release.ChecksumsName, maxTextFetch)
 	if err != nil {
@@ -138,15 +140,16 @@ func fetchVerified(ctx context.Context, hc *http.Client, baseURL string, pub ed2
 	if err := release.Verify(pub, sums, string(sig)); err != nil {
 		return nil, fmt.Errorf("the checksums file is not signed by the reright release key, so nothing was installed: %w", err)
 	}
-	table, err := release.ParseChecksums(sums)
-	if err != nil {
-		return nil, err
-	}
+	return release.ParseChecksums(sums)
+}
+
+// fetchAsset downloads one release file and checks it against the signed table.
+func fetchAsset(ctx context.Context, hc *http.Client, baseURL string, table map[string]string, asset string, limit int64) ([]byte, error) {
 	want, ok := table[asset]
 	if !ok {
 		return nil, fmt.Errorf("%s is not listed in the signed checksums", asset)
 	}
-	bin, err := get(ctx, hc, base+"/"+asset, maxDownload)
+	bin, err := get(ctx, hc, strings.TrimRight(baseURL, "/")+"/"+asset, limit)
 	if err != nil {
 		return nil, fmt.Errorf("download %s: %w", asset, err)
 	}
@@ -155,6 +158,14 @@ func fetchVerified(ctx context.Context, hc *http.Client, baseURL string, pub ed2
 		return nil, fmt.Errorf("%s does not match its signed checksum, so nothing was installed", asset)
 	}
 	return bin, nil
+}
+
+func fetchVerified(ctx context.Context, hc *http.Client, baseURL string, pub ed25519.PublicKey, asset string) ([]byte, error) {
+	table, err := signedTable(ctx, hc, baseURL, pub)
+	if err != nil {
+		return nil, err
+	}
+	return fetchAsset(ctx, hc, baseURL, table, asset, maxDownload)
 }
 
 type bearerTransport struct {

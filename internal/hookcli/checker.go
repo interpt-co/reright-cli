@@ -16,6 +16,10 @@ type HTTPChecker struct {
 	BaseURL string
 	Token   string
 	Client  *http.Client
+	// Version is sent as X-Reright-Client so the server can tell an old hook to upgrade.
+	Version string
+	// Policy, when set, is called with the server's X-Reright-Upgrade and X-Reright-Latest answers.
+	Policy func(upgrade, latest string)
 }
 
 func (c HTTPChecker) Approved(ctx context.Context, sha string) (bool, error) {
@@ -28,6 +32,9 @@ func (c HTTPChecker) Approved(ctx context.Context, sha string) (bool, error) {
 		return false, err
 	}
 	req.Header.Set("Authorization", "Bearer "+c.Token)
+	if c.Version != "" {
+		req.Header.Set("X-Reright-Client", "reright-hook/"+c.Version)
+	}
 	client := c.Client
 	if client == nil {
 		client = &http.Client{Timeout: 10 * time.Second}
@@ -37,6 +44,9 @@ func (c HTTPChecker) Approved(ctx context.Context, sha string) (bool, error) {
 		return false, err
 	}
 	defer resp.Body.Close()
+	if c.Policy != nil {
+		c.Policy(resp.Header.Get("X-Reright-Upgrade"), resp.Header.Get("X-Reright-Latest"))
+	}
 	if resp.StatusCode != http.StatusOK {
 		return false, fmt.Errorf("server answered %s", resp.Status)
 	}

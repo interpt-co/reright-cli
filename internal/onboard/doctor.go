@@ -26,6 +26,8 @@ type DoctorOptions struct {
 	Out    io.Writer
 	Agents []string
 	Dir    string
+	// Version is the version of the running reright. The doctor compares it with the installed reright-hook.
+	Version string
 }
 
 type Check struct {
@@ -126,6 +128,7 @@ func Doctor(ctx context.Context, o DoctorOptions) []Check {
 		hook = p.DefaultHook()
 	}
 	d.add("hook binary", checkHookBinary(ctx, hook, o.Home), "runs and lets a harmless call through: "+hook)
+	d.clientVersions(ctx, hook)
 
 	agents, err := doctorAgents(o, m, hadManifest)
 	if err != nil {
@@ -593,6 +596,38 @@ func denied(out string, err error) bool {
 		return true
 	}
 	return err == nil && strings.Contains(out, "deny")
+}
+
+// clientVersions reports the versions of reright and reright-hook and warns when they differ or the hook is too
+// old to say. Both are replaced together by reright upgrade.
+func (d *doctor) clientVersions(ctx context.Context, hook string) {
+	if d.o.Version == "" {
+		return
+	}
+	hv := hookVersion(ctx, hook)
+	switch {
+	case hv == "":
+		d.warn("client version", fmt.Sprintf("reright %s, and reright-hook does not report a version, so it is an older build", d.o.Version), "run reright upgrade")
+	case hv != d.o.Version:
+		d.warn("client version", fmt.Sprintf("reright %s but reright-hook %s", d.o.Version, hv), "run reright upgrade")
+	default:
+		d.emit(Check{Name: "client version", OK: true, Detail: fmt.Sprintf("reright and reright-hook are both %s", hv)})
+	}
+}
+
+// hookVersion runs the installed hook with --version. It returns "" when the hook has no such flag.
+func hookVersion(ctx context.Context, hook string) string {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, hook, "--version").Output()
+	if err != nil {
+		return ""
+	}
+	f := strings.Fields(string(out))
+	if len(f) < 2 {
+		return ""
+	}
+	return f[1]
 }
 
 func checkHookBinary(ctx context.Context, hook, home string) error {

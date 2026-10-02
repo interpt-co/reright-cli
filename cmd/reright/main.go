@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
@@ -19,8 +20,13 @@ import (
 
 var releasePublicKey string
 
+// version is set at release time with -X main.version. A local build reports "dev" and is never offered an update.
+var version = "dev"
+
 const usage = `usage: reright install --code CODE [--server URL] [--agent NAME]... [--all-supported] [--no-git] [--dry-run] [--yes] [--no-test] [--force]
+       reright upgrade [--check] [--force]
        reright doctor [--agent NAME]...
+       reright version
        reright uninstall [--agent NAME]... [--force]
 
 ` + switchUsage + `
@@ -82,6 +88,11 @@ func run(ctx context.Context, args []string, home string, stdout, stderr io.Writ
 	}
 	var err error
 	switch args[0] {
+	case "version", "--version", "-v":
+		fmt.Fprintf(stdout, "reright %s (%s/%s)\n", version, runtime.GOOS, runtime.GOARCH)
+		return 0
+	case "upgrade":
+		err = runUpgrade(ctx, args[1:], home, stdout, stderr)
 	case "install":
 		err = runInstall(ctx, args[1:], home, stdout, stderr)
 	case "doctor":
@@ -90,7 +101,7 @@ func run(ctx context.Context, args []string, home string, stdout, stderr io.Writ
 			fmt.Fprintln(stderr, aerr)
 			return 2
 		}
-		checks := onboard.Doctor(ctx, onboard.DoctorOptions{Home: home, Out: stdout, Agents: agents})
+		checks := onboard.Doctor(ctx, onboard.DoctorOptions{Home: home, Out: stdout, Agents: agents, Version: version})
 		if n := onboard.Failed(checks); n > 0 {
 			fmt.Fprintf(stdout, "%d check(s) failed.%s\n", n, warnings(checks))
 			return 1
@@ -123,6 +134,48 @@ func run(ctx context.Context, args []string, home string, stdout, stderr io.Writ
 		return 1
 	}
 	return 0
+}
+
+func runUpgrade(ctx context.Context, args []string, home string, stdout, stderr io.Writer) error {
+	fs := flag.NewFlagSet("upgrade", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	check := fs.Bool("check", false, "only say whether a newer release exists")
+	force := fs.Bool("force", false, "replace the programs even when the release is not newer")
+	releaseURL := fs.String("release-url", release.DefaultBaseURL, "where the signed checksums and programs are downloaded from")
+	hookPath := fs.String("hook-path", "", "where reright-hook is installed (default: the path recorded at install)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() > 0 {
+		return errors.New(usage)
+	}
+	if releasePublicKey == "" {
+		return errors.New("this build of reright has no release key compiled in, so it cannot verify downloads. Download the official reright binary again")
+	}
+	pub, err := release.ParsePublicKey(releasePublicKey)
+	if err != nil {
+		return err
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("cannot tell where reright is installed: %w", err)
+	}
+	if resolved, err := filepath.EvalSymlinks(exe); err == nil {
+		exe = resolved
+	}
+	return onboard.Upgrade(ctx, onboard.UpgradeOptions{
+		Home:       home,
+		ReleaseURL: *releaseURL,
+		PublicKey:  pub,
+		GOOS:       runtime.GOOS,
+		GOARCH:     runtime.GOARCH,
+		Current:    version,
+		ExePath:    exe,
+		HookPath:   *hookPath,
+		CheckOnly:  *check,
+		Force:      *force,
+		Out:        stdout,
+	})
 }
 
 func runInstall(ctx context.Context, args []string, home string, stdout, stderr io.Writer) error {

@@ -106,3 +106,24 @@ func TestDisableFlagsAndErrors(t *testing.T) {
 		t.Fatalf("scope missing:\n%s", out)
 	}
 }
+
+func TestVersionCommandAndFlag(t *testing.T) {
+	for _, arg := range []string{"version", "--version", "-v"} {
+		code, out, _ := exec(t, t.TempDir(), arg)
+		if code != 0 || !strings.HasPrefix(out, "reright "+version+" (") {
+			t.Fatalf("%s: %d %q", arg, code, out)
+		}
+	}
+}
+
+func TestUpgradeNeedsACompiledInKeyAndRejectsStrayArguments(t *testing.T) {
+	old := releasePublicKey
+	releasePublicKey = ""
+	defer func() { releasePublicKey = old }()
+	if code, _, errs := exec(t, t.TempDir(), "upgrade"); code != 1 || !strings.Contains(errs, "no release key") {
+		t.Fatalf("no key: %d %q", code, errs)
+	}
+	if code, _, _ := exec(t, t.TempDir(), "upgrade", "extra"); code == 0 {
+		t.Fatal("stray argument accepted")
+	}
+}

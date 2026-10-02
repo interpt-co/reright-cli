@@ -37,6 +37,15 @@ sha256sum reright-hook      # compare with the reright-hook_linux_amd64 line in 
 
 The builds use `-trimpath` and no cgo so they should reproduce. If one does not, please open an issue.
 
+## Upgrading
+
+```sh
+reright upgrade --check   # is there a newer release?
+reright upgrade           # replace reright and reright-hook, no setup code needed
+```
+
+`reright upgrade` checks the signature of `checksums.txt` and the checksum of each program before it replaces anything, the same way `reright install` does. Your token and agent configuration stay as they are. Once a day the hook can show a one line notice in Claude Code when a newer release exists. Set `RERIGHT_NO_UPDATE_CHECK=1` to turn that off. `reright version` and `reright-hook --version` print the version.
+
 ## Building and testing
 
 ```sh
