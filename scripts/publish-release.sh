@@ -13,5 +13,6 @@ git rev-parse -q --verify "refs/tags/$TAG" >/dev/null || { echo "tag $TAG does n
 
 go test ./...
 scripts/build-release.sh dist/release
+git push origin "$TAG"
 gh release create "$TAG" dist/release/* --title "$TAG" --generate-notes
 echo "published $TAG"
