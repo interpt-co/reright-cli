@@ -12,7 +12,6 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"time"
 
@@ -194,8 +193,6 @@ func switchHint(kinds []string) string {
 	return " If this block is wrong, only the user can lift it: ask them to run `reright disable " + strings.Join(named, " ") + " --for 1h` in their own terminal (`reright enable " + strings.Join(named, " ") + "` turns it back on). Do not try to run it yourself."
 }
 
-var switchCommand = regexp.MustCompile(`(^|[^A-Za-z0-9_.-])reright(\s+-\S+)*\s+(disable|enable)([^A-Za-z0-9_-]|$)|enforcement\.json`)
-
 // guardSwitches stops an agent from changing the switches. Only the user turns checks off,
 // from their own terminal or with the agent's shell-escape prefix, neither of which reaches this hook.
 func guardSwitches(in call) string {
@@ -205,7 +202,7 @@ func guardSwitches(in call) string {
 	var b struct {
 		Command string `json:"command"`
 	}
-	if json.Unmarshal(in.Input, &b) != nil || !switchCommand.MatchString(b.Command) {
+	if json.Unmarshal(in.Input, &b) != nil || !hookcheck.SwitchCommand(b.Command) {
 		return ""
 	}
 	return "reright: only the user can turn reright's checks on or off. Do not run `reright disable` or `reright enable`, and do not edit enforcement.json. Tell the user what you need and ask them to run it in their own terminal."
