@@ -270,6 +270,9 @@ func unreadable(what string) Result {
 
 func gitCall(args []arg, sh shell) Result {
 	dir := sh.cwd
+	// A -C directory built from a variable only matters for the subcommands that carry text, because the
+	// directory decides which repository's message file and hooks apply. rev-parse, status and log are harmless.
+	dirUnknown := false
 	i := 0
 	for ; i < len(args); i++ {
 		a := args[i]
@@ -283,7 +286,8 @@ func gitCall(args []arg, sh shell) Result {
 		case a.s == "-C" && i+1 < len(args):
 			i++
 			if !args[i].ok {
-				return problem("git -C with a directory the hook cannot read.")
+				dirUnknown = true
+				continue
 			}
 			if filepath.IsAbs(args[i].s) {
 				dir = args[i].s
@@ -309,9 +313,13 @@ func gitCall(args []arg, sh shell) Result {
 	}
 	sh.cwd = dir
 	switch args[i].s {
-	case "commit":
-		return gitCommit(args[i+1:], sh)
-	case "tag", "merge":
+	case "commit", "tag", "merge":
+		if dirUnknown {
+			return problem("git -C with a directory the hook cannot read, on a command that carries text. Write the directory out literally.")
+		}
+		if args[i].s == "commit" {
+			return gitCommit(args[i+1:], sh)
+		}
 		return gitMessage(args[i].s, args[i+1:], sh)
 	}
 	return Result{}

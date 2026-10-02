@@ -25,6 +25,7 @@ func TestBash(t *testing.T) {
 	must(os.WriteFile(filepath.Join(dir, "msg.txt"), []byte("From file\n\nBody\n"), 0o644))
 	must(os.WriteFile(filepath.Join(dir, "body.md"), []byte("PR body from file\n"), 0o644))
 	must(os.WriteFile(filepath.Join(dir, "x.sh"), []byte("#!/bin/sh\ngit commit -m from-script\n"), 0o755))
+	must(os.WriteFile(filepath.Join(dir, "rev.sh"), []byte("#!/usr/bin/env bash\nset -euo pipefail\nROOT=$(pwd)\nREV=$(git -C \"$ROOT\" rev-parse --short HEAD 2>/dev/null || echo nogit)\ncurl -fsS http://127.0.0.1:8095/healthz\necho \"$REV\"\n"), 0o755))
 	must(os.WriteFile(filepath.Join(dir, "plain.sh"), []byte("echo hello\n"), 0o755))
 	must(os.WriteFile(filepath.Join(dir, "clean.py"), []byte("import json, sys\nprint(json.dumps(sys.argv[1:]))\n"), 0o644))
 	must(os.WriteFile(filepath.Join(dir, "tool.py"), []byte("import os\nos.system('git commit -m x')\n"), 0o644))
@@ -68,6 +69,17 @@ func TestBash(t *testing.T) {
 		{"reuse", `git commit -C HEAD`, nil, false},
 		{"git -C", `git -C sub commit -m "In sub"`, []string{"In sub"}, false},
 		{"git -C file", `git -C sub commit -F m.txt`, []string{"In sub file"}, false},
+		{"git -C variable read only", `git -C "$ROOT" rev-parse --short HEAD`, nil, false},
+		{"git -C variable in a substitution", `REV=$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo nogit)`, nil, false},
+		{"variable binary with a plain subcommand", `"$BIN" check-db "$DB"`, nil, false},
+		{"variable git commit", `"$G" commit -m "x"`, nil, true},
+		{"variable command naming git", `"$RUN" git status`, nil, true},
+		{"variable command with message flag", `"$TOOL" send -m "x"`, nil, true},
+		{"array built from plain words", "cmd=(aws s3 ls)\nif git rev-parse HEAD; then true; fi\n\"${cmd[@]}\"", nil, false},
+		{"array built from a variable", "G=git\ncmd=($G commit -m x)\n\"${cmd[@]}\"", nil, true},
+		{"git -C variable commit", `git -C "$ROOT" commit -m "Subject"`, nil, true},
+		{"git -C variable tag", `git -C "$ROOT" tag -m "Release" v1`, nil, true},
+		{"release script with a read only git -C", `./rev.sh`, nil, false},
 		{"git -c config", `git -c user.name=x commit -m "Configured"`, []string{"Configured"}, false},
 		{"git path binary", `/usr/bin/git commit -m "Abs"`, []string{"Abs"}, false},
 		{"gh pr create", `gh pr create --title "Add X" --body "Adds X because Y."`, []string{"Add X\n\nAdds X because Y."}, false},

@@ -76,9 +76,56 @@ func stripWrapper(name string, args []arg) []arg {
 	return args[i:]
 }
 
+func (sh shell) unreadableCommandAlways() Result {
+	return problem("a command name is built from a variable the hook cannot read, and the line mentions git, gh, curl or mail. Write the command out literally. " + plainArgs)
+}
+
 func (sh shell) unreadableCommand(callText string) Result {
 	if sh.hint || sensitiveWord.MatchString(callText) {
-		return problem("a command name is built from a variable the hook cannot read, and the line mentions git, gh, curl or mail. Write the command out literally. " + plainArgs)
+		return sh.unreadableCommandAlways()
+	}
+	return Result{}
+}
+
+// textMarkers are the words a git, gh or mail call needs to carry reviewable text.
+var textMarkers = map[string]bool{
+	"commit": true, "tag": true, "merge": true, "pr": true, "issue": true, "release": true, "comment": true, "review": true,
+	"send": true, "reply": true, "-m": true, "--message": true, "--body": true, "--body-file": true, "-F": true, "--file": true,
+}
+
+var arrayCommand = regexp.MustCompile(`^\s*"?\$\{([A-Za-z_][A-Za-z0-9_]*)\[[@*]\]\}"?`)
+
+// arrayIsPlain reports whether every assignment to the array in the script starts with a literal command that
+// does not name git, gh, curl or a mailer. An array whose first word is a variable could hide any command.
+func (sh shell) arrayIsPlain(name string) bool {
+	re := regexp.MustCompile(`(?s)\b` + regexp.QuoteMeta(name) + `\+?=\(\s*(.*?)\)\s*(?:\n|$)`)
+	found := false
+	for _, m := range re.FindAllStringSubmatch(sh.raw, -1) {
+		found = true
+		body := strings.TrimSpace(m[1])
+		if body == "" || strings.HasPrefix(body, "$") || strings.HasPrefix(body, `"$`) || sensitiveWord.MatchString(m[1]) {
+			return false
+		}
+	}
+	return found
+}
+
+// unreadableName decides what to do with a command whose name is built from a variable. The script may have
+// set the variable to git, but a call that carries no text, such as "$BIN" check-db, sends nothing to review.
+// It stays blocked when the call itself names git, gh, curl or a mailer, when its arguments are the words a
+// text-carrying call needs, or when the command is an array the script never shows being built from plain words.
+func (sh shell) unreadableName(args []arg, callText string) Result {
+	block := sh.unreadableCommandAlways()
+	if sensitiveWord.MatchString(callText) {
+		return block
+	}
+	for _, a := range args[1:] {
+		if a.ok && textMarkers[a.s] {
+			return block
+		}
+	}
+	if m := arrayCommand.FindStringSubmatch(callText); m != nil && sh.hint && !sh.arrayIsPlain(m[1]) {
+		return block
 	}
 	return Result{}
 }
@@ -88,7 +135,7 @@ func (sh shell) dispatch(args []arg, callText string) Result {
 		return Result{}
 	}
 	if !args[0].ok {
-		return sh.unreadableCommand(callText)
+		return sh.unreadableName(args, callText)
 	}
 	name := path.Base(args[0].s)
 	switch {
