@@ -77,24 +77,6 @@ func Upgrade(ctx context.Context, o UpgradeOptions) error {
 	if err != nil {
 		return err
 	}
-	_, known := release.ParseVersion(o.Current)
-	newer := release.Newer(latest, o.Current) || !known // a local build can always be replaced
-	if o.CheckOnly {
-		if newer {
-			fmt.Fprintf(o.Out, "reright %s is available (you have %s). Run: reright upgrade\n", latest, o.Current)
-		} else {
-			fmt.Fprintf(o.Out, "reright %s is up to date.\n", o.Current)
-		}
-		return nil
-	}
-	if !newer && !o.Force {
-		fmt.Fprintf(o.Out, "reright %s is up to date.\n", o.Current)
-		return nil
-	}
-	if o.ExePath == "" {
-		return errors.New("cannot tell where the running reright is, so it cannot be replaced")
-	}
-
 	hookPath := o.HookPath
 	if hookPath == "" {
 		hookPath = Paths{o.Home}.DefaultHook()
@@ -104,6 +86,39 @@ func Upgrade(ctx context.Context, o UpgradeOptions) error {
 	}
 	_, statErr := os.Stat(hookPath)
 	hookInstalled := statErr == nil
+
+	// Each program is judged on its own: reright may be current while the hook is older, or too old to say.
+	_, known := release.ParseVersion(o.Current)
+	cliStale := release.Newer(latest, o.Current) || !known // a local build can always be replaced
+	hookSeen := ""
+	hookStale := false
+	if hookInstalled {
+		hookSeen = hookVersion(ctx, hookPath)
+		hookStale = hookSeen != latest
+	}
+	stale := cliStale || hookStale
+	if o.CheckOnly {
+		switch {
+		case cliStale:
+			fmt.Fprintf(o.Out, "reright %s is available (you have %s). Run: reright upgrade\n", latest, o.Current)
+		case hookStale:
+			seen := hookSeen
+			if seen == "" {
+				seen = "an older build with no version"
+			}
+			fmt.Fprintf(o.Out, "reright %s is current, but reright-hook is %s and the release is %s. Run: reright upgrade\n", o.Current, seen, latest)
+		default:
+			fmt.Fprintf(o.Out, "reright %s is up to date.\n", o.Current)
+		}
+		return nil
+	}
+	if !stale && !o.Force {
+		fmt.Fprintf(o.Out, "reright %s is up to date.\n", o.Current)
+		return nil
+	}
+	if o.ExePath == "" {
+		return errors.New("cannot tell where the running reright is, so it cannot be replaced")
+	}
 
 	fmt.Fprintf(o.Out, "Downloading reright %s and checking its signed checksums\n", latest)
 	cli, err := fetchAsset(ctx, o.HTTP, o.ReleaseURL, table, release.AssetName(cliBinary, o.GOOS, o.GOARCH), maxDownload)
@@ -130,6 +145,6 @@ func Upgrade(ctx context.Context, o UpgradeOptions) error {
 		return fmt.Errorf("replace %s: %w (the hook was already replaced)", o.ExePath, err)
 	}
 	fmt.Fprintf(o.Out, "Replaced %s\n", o.ExePath)
-	fmt.Fprintf(o.Out, "Upgraded reright from %s to %s. Run reright doctor to check the setup.\n", o.Current, latest)
+	fmt.Fprintf(o.Out, "Upgraded to reright %s (was reright %s). Run reright doctor to check the setup.\n", latest, o.Current)
 	return nil
 }

@@ -26,6 +26,7 @@ type upgradeWorld struct {
 	opts    UpgradeOptions
 	cliNew  []byte
 	hookNew []byte
+	hookOld string
 }
 
 // newUpgradeWorld serves a signed release at the given version and installs "old" programs in a temp home.
@@ -62,11 +63,12 @@ func newUpgradeWorld(t *testing.T, latest string) *upgradeWorld {
 
 	w.exe = filepath.Join(w.home, "bin", "reright")
 	w.hook = filepath.Join(w.home, ".local", "bin", "reright-hook")
-	for _, p := range []string{w.exe, w.hook} {
+	w.hookOld = "#!/bin/sh\necho 'reright-hook v0.1.1 (linux/amd64)'\n"
+	for p, body := range map[string]string{w.exe: "old", w.hook: w.hookOld} {
 		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(p, []byte("old"), 0o755); err != nil {
+		if err := os.WriteFile(p, []byte(body), 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -99,7 +101,7 @@ func TestUpgradeReplacesBothPrograms(t *testing.T) {
 	if info.Mode()&0o111 == 0 {
 		t.Error("the new reright is not executable")
 	}
-	if !strings.Contains(w.out(), "from v0.1.1 to v0.1.2") {
+	if !strings.Contains(w.out(), "to reright v0.1.2 (was reright v0.1.1)") {
 		t.Errorf("output %q", w.out())
 	}
 }
@@ -109,7 +111,7 @@ func TestUpgradeDoesNothingWhenCurrent(t *testing.T) {
 	if err := Upgrade(context.Background(), w.opts); err != nil {
 		t.Fatal(err)
 	}
-	if w.read(w.exe) != "old" || w.read(w.hook) != "old" || !strings.Contains(w.out(), "up to date") {
+	if w.read(w.exe) != "old" || w.read(w.hook) != w.hookOld || !strings.Contains(w.out(), "up to date") {
 		t.Fatalf("an up to date install was touched: %q", w.out())
 	}
 	w.opts.Force = true
@@ -151,7 +153,7 @@ func TestUpgradeRefusesAnUnsignedOrTamperedRelease(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "not signed by the reright release key") {
 		t.Fatalf("a release signed by another key was accepted: %v", err)
 	}
-	if w.read(w.exe) != "old" || w.read(w.hook) != "old" {
+	if w.read(w.exe) != "old" || w.read(w.hook) != w.hookOld {
 		t.Fatal("files changed although the signature was wrong")
 	}
 
@@ -205,5 +207,36 @@ func TestHookVersionReadsTheFlag(t *testing.T) {
 	}
 	if got := hookVersion(context.Background(), older); got != "" {
 		t.Errorf("a hook without the flag reported %q", got)
+	}
+}
+
+func TestUpgradeReplacesAnOlderHookEvenWhenRerightIsCurrent(t *testing.T) {
+	w := newUpgradeWorld(t, "v0.1.2")
+	w.opts.Current = "v0.1.2"
+	w.opts.CheckOnly = true
+	if err := Upgrade(context.Background(), w.opts); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(w.out(), "reright-hook is v0.1.1") || !strings.Contains(w.out(), "Run: reright upgrade") {
+		t.Fatalf("check output %q", w.out())
+	}
+	w.opts.CheckOnly = false
+	if err := Upgrade(context.Background(), w.opts); err != nil {
+		t.Fatal(err)
+	}
+	if w.read(w.hook) != string(w.hookNew) {
+		t.Fatal("an older hook was not replaced")
+	}
+}
+
+func TestUpgradeReplacesAHookThatReportsNoVersion(t *testing.T) {
+	w := newUpgradeWorld(t, "v0.1.2")
+	w.opts.Current = "v0.1.2"
+	os.WriteFile(w.hook, []byte("#!/bin/sh\necho 'reright-hook: missing subcommand' >&2\nexit 2\n"), 0o755)
+	if err := Upgrade(context.Background(), w.opts); err != nil {
+		t.Fatal(err)
+	}
+	if w.read(w.hook) != string(w.hookNew) {
+		t.Fatal("a hook from before version reporting was not replaced")
 	}
 }
