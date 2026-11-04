@@ -13,6 +13,7 @@ import (
 
 	"github.com/interpt-co/reright-cli/internal/githook"
 	"github.com/interpt-co/reright-cli/internal/hookcli"
+	"github.com/interpt-co/reright-cli/internal/onboard"
 )
 
 const defaultURL = "https://app.reright.it"
@@ -51,6 +52,7 @@ func main() {
 		ConfigDir:  cfgDir,
 		Version:    version,
 		ReleaseURL: os.Getenv("RERIGHT_RELEASE_URL"),
+		Heal:       func() { onboard.HealClaudeHooks(home, stateDir, os.Getenv, time.Now()) },
 	})
 	cancel()
 	os.Exit(code)

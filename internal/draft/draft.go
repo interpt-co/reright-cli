@@ -14,6 +14,19 @@ import (
 
 type Kind string
 
+// The kinds an agent is told to use. They describe what the reader receives. Where the text goes (a
+// recipient, a channel, a repository) belongs in the target and the context, not in the kind.
+const (
+	KindEmail    Kind = "email"
+	KindMessage  Kind = "message"
+	KindPost     Kind = "post"
+	KindDocument Kind = "document"
+	KindCode     Kind = "code"
+	KindOther    Kind = "other"
+)
+
+// Older kinds. Agents set up before the kinds were reduced still send them, and drafts already stored
+// carry them. They are accepted and shown as the kind they stand for now.
 const (
 	KindCommit      Kind = "commit"
 	KindPR          Kind = "pr"
@@ -21,14 +34,34 @@ const (
 	KindCodeComment Kind = "code_comment"
 	KindOdooLogNote Kind = "odoo_log_note"
 	KindOdooMessage Kind = "odoo_message"
-	KindEmail       Kind = "email"
 	KindChat        Kind = "chat"
-	KindOther       Kind = "other"
 )
 
-var Kinds = []Kind{KindCommit, KindPR, KindPRComment, KindCodeComment, KindOdooLogNote, KindOdooMessage, KindEmail, KindChat, KindOther}
+var Kinds = []Kind{KindEmail, KindMessage, KindPost, KindDocument, KindCode, KindOther}
+
+var legacyKinds = map[Kind]Kind{
+	KindCommit:      KindCode,
+	KindPR:          KindCode,
+	KindPRComment:   KindCode,
+	KindCodeComment: KindCode,
+	KindOdooLogNote: KindMessage,
+	KindOdooMessage: KindMessage,
+	KindChat:        KindMessage,
+}
+
+// Canonical returns the current kind for k: an older kind becomes the kind it stands for, and a current
+// kind is returned as it is.
+func (k Kind) Canonical() Kind {
+	if c, ok := legacyKinds[k]; ok {
+		return c
+	}
+	return k
+}
 
 func (k Kind) Valid() bool {
+	if _, ok := legacyKinds[k]; ok {
+		return true
+	}
 	for _, v := range Kinds {
 		if k == v {
 			return true
@@ -37,9 +70,49 @@ func (k Kind) Valid() bool {
 	return false
 }
 
-// HasTitle reports whether the first line of this kind's text is a title or subject.
+// HasTitle reports whether the first line of this kind's text can be a title or subject.
 func (k Kind) HasTitle() bool {
-	return k == KindCommit || k == KindPR || k == KindEmail
+	switch k {
+	case KindEmail, KindCode, KindCommit, KindPR:
+		return true
+	}
+	return false
+}
+
+// Section is one named part of a draft's text. The review page shows each part in its own editor.
+type Section struct {
+	Name string `json:"name"`
+	Text string `json:"text"`
+}
+
+// Sections splits text into the parts the reviewer edits one by one. An email splits into a subject and
+// a body, and code text (a commit, a PR) into a title and a description, the way SplitTitle does. Any
+// other text, and text without a blank line after its first line, is a single section without a name.
+func Sections(k Kind, text string) []Section {
+	if k.HasTitle() {
+		if title, body, ok := SplitTitle(text); ok {
+			first, second := "Title", "Description"
+			if k.Canonical() == KindEmail {
+				first, second = "Subject", "Body"
+			}
+			if body == "" {
+				return []Section{{Name: first, Text: title}}
+			}
+			return []Section{{Name: first, Text: title}, {Name: second, Text: body}}
+		}
+	}
+	return []Section{{Text: text}}
+}
+
+// JoinSections is the inverse of Sections for text that was split: the parts with a blank line between.
+func JoinSections(parts []string) string {
+	var kept []string
+	for _, p := range parts {
+		if strings.TrimSpace(p) != "" {
+			kept = append(kept, strings.TrimRight(p, " \t\r\n"))
+		}
+	}
+	return strings.Join(kept, "\n\n")
 }
 
 type Status string
@@ -49,6 +122,15 @@ const (
 	StatusApproved Status = "approved"
 	StatusRejected Status = "rejected"
 	StatusExpired  Status = "expired"
+)
+
+const (
+	VoiceQueued    = "queued"
+	VoiceSuggested = "suggested"
+	VoiceDropped   = "dropped"
+	VoiceTimeout   = "timeout"
+	VoiceSkipped   = "skipped"
+	DecidedByVoice = "voice"
 )
 
 type Draft struct {
@@ -64,6 +146,10 @@ type Draft struct {
 	Status       Status    `json:"status"`
 	FinalText    string    `json:"final_text,omitempty"`
 	RejectReason string    `json:"reject_reason,omitempty"`
+	Suggestion   string    `json:"suggestion,omitempty"`
+	VoiceNote    string    `json:"voice_note,omitempty"`
+	VoiceState   string    `json:"voice_state,omitempty"`
+	DecidedBy    string    `json:"decided_by,omitempty"`
 	CreatedAt    time.Time `json:"created_at"`
 	DecidedAt    time.Time `json:"decided_at"`
 	Purged       bool      `json:"purged,omitempty"`

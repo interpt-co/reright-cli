@@ -40,6 +40,9 @@ type Env struct {
 	ReleaseURL string
 	// HTTP is the client for that fetch. Nil means a client with a short timeout.
 	HTTP *http.Client
+	// Heal brings the Claude Code hook settings up to date after an upgrade. Nil means no healing. It runs
+	// after the decision is written, and its errors and panics are ignored.
+	Heal func()
 }
 
 type lock struct {
@@ -48,7 +51,8 @@ type lock struct {
 }
 
 // Run executes one hook subcommand for Claude Code: pre (PreToolUse), post
-// (PostToolUse on wait_for_review) or prompt (UserPromptSubmit). Decisions go
+// (PostToolUse on submit_for_review and wait_for_review), prompt (UserPromptSubmit)
+// or stop (Stop). Decisions go
 // to stdout as hook JSON; the exit code is 0 unless the subcommand is unknown.
 func Run(ctx context.Context, sub string, stdin io.Reader, stdout, stderr io.Writer, env Env) int {
 	return RunAgent(ctx, AgentClaude, sub, stdin, stdout, stderr, env)
@@ -78,6 +82,19 @@ func RunAgent(ctx context.Context, agent, sub string, stdin io.Reader, stdout, s
 	case "post":
 		if decodeErr == nil && isWaitForReview(c.Tool) {
 			post(c, stderr, env)
+			if err := recordWait(c, env); err != nil {
+				fmt.Fprintln(stderr, "reright-hook:", err)
+			}
+		}
+		if decodeErr == nil && isSubmitForReview(c.Tool) {
+			if err := recordSubmit(c, env); err != nil {
+				fmt.Fprintln(stderr, "reright-hook:", err)
+			}
+		}
+	case "stop":
+		if ad.stop != nil {
+			block, note := stopCheck(c, decodeErr, env)
+			ad.stop(stdout, block, note)
 		}
 	case "prompt":
 		if decodeErr == nil {
@@ -87,15 +104,23 @@ func RunAgent(ctx context.Context, agent, sub string, stdin io.Reader, stdout, s
 			ad.promptOK(stdout)
 		}
 		if ad.notice != nil {
-			if msg := updateNotice(ctx, env); msg != "" {
-				ad.notice(stdout, msg)
+			if n := updateNotice(ctx, env); n.User != "" {
+				ad.notice(stdout, n)
 			}
 		}
 	default:
-		fmt.Fprintf(stderr, "reright-hook: unknown subcommand %q (want pre, post or prompt)\n", sub)
+		fmt.Fprintf(stderr, "reright-hook: unknown subcommand %q (want pre, post, prompt or stop)\n", sub)
 		return UsageExit("")
 	}
+	if agent == AgentClaude && env.Heal != nil {
+		heal(env.Heal)
+	}
 	return 0
+}
+
+func heal(f func()) {
+	defer func() { recover() }()
+	f()
 }
 
 func preReason(ctx context.Context, c call, decodeErr error, env Env) (reason string) {
@@ -236,55 +261,22 @@ func post(in call, stderr io.Writer, env Env) {
 	}
 }
 
-// findRejection looks through a tool response for a wait_for_review result
-// with status "rejected". MCP results arrive either as structured content or
-// as JSON inside a text block, so both shapes are searched.
 func findRejection(raw json.RawMessage) (id, reason string, found bool) {
-	var v any
-	if json.Unmarshal(raw, &v) != nil {
-		return "", "", false
-	}
-	var walk func(any) bool
-	walk = func(v any) bool {
-		switch t := v.(type) {
-		case map[string]any:
-			if t["status"] == "rejected" {
-				id, _ = t["id"].(string)
-				reason, _ = t["reason"].(string)
-				return true
-			}
-			for _, c := range t {
-				if walk(c) {
-					return true
-				}
-			}
-		case []any:
-			for _, c := range t {
-				if walk(c) {
-					return true
-				}
-			}
-		case string:
-			if s := strings.TrimSpace(t); strings.HasPrefix(s, "{") {
-				var inner any
-				if json.Unmarshal([]byte(s), &inner) == nil {
-					return walk(inner)
-				}
-			}
-		}
-		return false
-	}
-	found = walk(v)
-	return id, reason, found
+	r, ok := findResult(raw, func(m map[string]any) bool { return m["status"] == "rejected" })
+	return r.ID, r.Reason, ok
 }
 
-func isWaitForReview(tool string) bool {
+func isWaitForReview(tool string) bool { return isRerightTool(tool, waitForReviewTool) }
+
+func isSubmitForReview(tool string) bool { return isRerightTool(tool, submitForReviewTool) }
+
+func isRerightTool(tool, want string) bool {
 	rest, ok := strings.CutPrefix(strings.ToLower(tool), "mcp__")
 	if !ok {
 		return false
 	}
 	server, name, ok := strings.Cut(rest, "__")
-	return ok && name == waitForReviewTool && (server == "reright" || (strings.HasPrefix(server, "plugin_") && strings.HasSuffix(server, "_reright")))
+	return ok && name == want && (server == "reright" || (strings.HasPrefix(server, "plugin_") && strings.HasSuffix(server, "_reright")))
 }
 
 const waitForReviewTool = "wait_for_review"

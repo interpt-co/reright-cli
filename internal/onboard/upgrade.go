@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -145,6 +146,84 @@ func Upgrade(ctx context.Context, o UpgradeOptions) error {
 		return fmt.Errorf("replace %s: %w (the hook was already replaced)", o.ExePath, err)
 	}
 	fmt.Fprintf(o.Out, "Replaced %s\n", o.ExePath)
+	if hookInstalled {
+		refreshClaudeHooks(Paths{o.Home}, hookPath, o.Out)
+	}
 	fmt.Fprintf(o.Out, "Upgraded to reright %s (was reright %s). Run reright doctor to check the setup.\n", latest, o.Current)
 	return nil
+}
+
+// refreshClaudeHooks adds hook entries this version knows about to a Claude Code setup that reright installed
+// and that still has some of its hooks. A file without any reright hook is left alone.
+func refreshClaudeHooks(p Paths, hookPath string, out io.Writer) {
+	unlock, err := lockConfig(p)
+	if err != nil {
+		return
+	}
+	defer unlock()
+	missing, err := healSettings(p, hookPath)
+	if err != nil {
+		fmt.Fprintf(out, "Could not add the new Claude Code hooks to %s (%v). Run reright doctor.\n", p.Settings(), err)
+		return
+	}
+	if len(missing) > 0 {
+		fmt.Fprintf(out, "Added the new Claude Code hooks to %s: %s\n", p.Settings(), strings.Join(missing, ", "))
+	}
+}
+
+// healSettings merges the current hook entries into ~/.claude/settings.json when reright installed them
+// there and some, but not all, are missing. It returns what it added. The caller holds the config lock.
+// An empty hookPath means the one recorded at install, else the default.
+func healSettings(p Paths, hookPath string) ([]string, error) {
+	m, had, err := loadManifest(p)
+	if err != nil || !had || m.Agents[agentClaude] == nil {
+		return nil, err
+	}
+	if hookPath == "" {
+		hookPath = m.HookPath
+	}
+	if hookPath == "" {
+		hookPath = p.DefaultHook()
+	}
+	raw, err := os.ReadFile(p.Settings())
+	if err != nil {
+		return nil, err
+	}
+	missing, err := MissingHooks(raw, hookPath)
+	if err != nil || len(missing) == 0 || len(missing) == len(hookSpecs) {
+		return nil, err
+	}
+	e := fileEdit{Path: p.Settings(), Parts: []part{claudeHooksPart(hookPath)}}
+	if err := writeEdit(p, agentClaude, &m, m.record(agentClaude), e, false); err != nil {
+		return nil, err
+	}
+	return missing, nil
+}
+
+const healEvery = 24 * time.Hour
+
+// HealClaudeHooks is run by reright-hook for Claude Code. An older reright upgrade replaces the binaries but
+// not the settings, so the new hook adds the entries it needs itself, at most once a day for each settings
+// file. RERIGHT_NO_SELF_HEAL=1 turns it off. It writes nothing to the terminal; the caller ignores errors.
+func HealClaudeHooks(home, stateDir string, getenv func(string) string, now time.Time) error {
+	if getenv("RERIGHT_NO_SELF_HEAL") == "1" || home == "" || stateDir == "" {
+		return nil
+	}
+	p := Paths{home}
+	marker := filepath.Join(stateDir, "selfheal", sha([]byte(p.Settings()))[:16])
+	if b, err := os.ReadFile(marker); err == nil {
+		if t, err := time.Parse(time.RFC3339, strings.TrimSpace(string(b))); err == nil && now.Sub(t) < healEvery && !t.After(now) {
+			return nil
+		}
+	}
+	if err := writePrivate(marker, []byte(now.UTC().Format(time.RFC3339)+"\n")); err != nil {
+		return err
+	}
+	unlock, err := tryLockConfig(p)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	_, err = healSettings(p, "")
+	return err
 }

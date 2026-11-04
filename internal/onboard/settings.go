@@ -11,7 +11,7 @@ import (
 
 const hookMarker = "reright-hook"
 
-const waitMatcher = "mcp__reright__wait_for_review"
+const postMatcher = "mcp__reright__(submit_for_review|wait_for_review)"
 
 var errShape = errors.New("settings.json does not have the expected shape (hooks must be an object of lists)")
 
@@ -151,8 +151,9 @@ type hookSpec struct {
 
 var hookSpecs = []hookSpec{
 	{"PreToolUse", "*", "pre", 30},
-	{"PostToolUse", waitMatcher, "post", 10},
+	{"PostToolUse", postMatcher, "post", 10},
 	{"UserPromptSubmit", "", "prompt", 10},
+	{"Stop", "", "stop", 10},
 }
 
 func (s hookSpec) command(hookPath string) string {

@@ -42,11 +42,12 @@ type adapter struct {
 	promptOK func(stdout io.Writer)
 	// notice shows the person a one line message when a prompt is submitted. Only agents that have such a
 	// channel set it.
-	notice func(stdout io.Writer, msg string)
+	notice func(stdout io.Writer, n notice)
+	stop   func(stdout io.Writer, block, note string)
 }
 
 var adapters = map[string]adapter{
-	AgentClaude:  {decode: decodeClaude, deny: denyClaude, notice: claudeNotice},
+	AgentClaude:  {decode: decodeClaude, deny: denyClaude, notice: claudeNotice, stop: claudeStop},
 	AgentCodex:   {decode: decodeCodex, deny: denyClaude},
 	AgentGemini:  {decode: decodeGemini, deny: denyGemini},
 	AgentCopilot: {decode: decodeCopilot, deny: denyCopilot},
@@ -440,7 +441,7 @@ func ParseArgs(args []string) (agent, sub string, err error) {
 		agent = AgentClaude
 	}
 	if sub == "" {
-		return "", "", errors.New("missing subcommand (want pre, post or prompt)")
+		return "", "", errors.New("missing subcommand (want pre, post, prompt or stop)")
 	}
 	return agent, sub, nil
 }
@@ -455,7 +456,7 @@ func AgentFromArgs(args []string) (string, error) {
 // UsageExit is the exit code for a usage error. It blocks (2) for pre and for
 // anything that is not a known subcommand, so a typo never turns into an allow.
 func UsageExit(sub string) int {
-	if sub == "post" || sub == "prompt" {
+	if sub == "post" || sub == "prompt" || sub == "stop" {
 		return 1
 	}
 	return 2

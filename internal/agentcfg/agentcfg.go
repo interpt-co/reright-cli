@@ -25,9 +25,10 @@ const (
 )
 
 const (
-	preTimeoutSec  = 30
-	postTimeoutSec = 10
-	waitForReview  = "wait_for_review"
+	preTimeoutSec   = 30
+	postTimeoutSec  = 10
+	waitForReview   = "wait_for_review"
+	submitForReview = "submit_for_review"
 )
 
 // Snippet is one config file, or a fragment of one, for an agent.
@@ -93,8 +94,9 @@ type obj = map[string]any
 func claude(q string) ([]Snippet, error) {
 	content, err := render(obj{"hooks": obj{
 		"PreToolUse":       []any{obj{"matcher": "*", "hooks": []any{obj{"type": "command", "command": q + " pre", "timeout": preTimeoutSec}}}},
-		"PostToolUse":      []any{obj{"matcher": "mcp__reright__" + waitForReview, "hooks": []any{obj{"type": "command", "command": q + " post", "timeout": postTimeoutSec}}}},
+		"PostToolUse":      []any{obj{"matcher": "mcp__reright__(" + submitForReview + "|" + waitForReview + ")", "hooks": []any{obj{"type": "command", "command": q + " post", "timeout": postTimeoutSec}}}},
 		"UserPromptSubmit": []any{obj{"hooks": []any{obj{"type": "command", "command": q + " prompt", "timeout": postTimeoutSec}}}},
+		"Stop":             []any{obj{"hooks": []any{obj{"type": "command", "command": q + " stop", "timeout": postTimeoutSec}}}},
 	}})
 	if err != nil {
 		return nil, err

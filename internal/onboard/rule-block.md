@@ -1,9 +1,11 @@
 <!-- reright:start -->
 ## reright: approval for text people read
 
-Every piece of text a person will read goes through reright before you use it: commit messages, PR and issue titles and bodies, PR comments, code comments, Odoo log notes and messages, emails and client messages. That includes drafts you would otherwise show the user in chat for approval. Apply the humanizer rules to your draft before you submit it.
+Every piece of text a person will read goes through reright before you use it: emails, messages to clients and colleagues, posts, documents, commit messages, PR and issue text, and comments. That includes drafts you would otherwise show the user in chat for approval. Write the text plainly, the way the user would, without padding.
 
-1. Call `submit_for_review` (reright MCP server) with the kind, the exact text, the target, `agent`, `run` and a context block. For commit, pr and email, the first line is the title or subject, then a blank line, then the body. For a code comment, submit the comment text with kind `code_comment` and target `file:line` before writing it into the file.
+1. Call `submit_for_review` (reright MCP server) with the kind, the exact text, the target, `agent`, `run` and a context block.
+   - `kind` is `email`, `message` (chat, replies, direct messages), `post` (anything public), `document`, `code` (commits, PRs, issues, code comments) or `other`. Say where the text goes in `target`: a recipient, a channel, a repo and branch, a file and line.
+   - For an email, a commit or a PR, the first line is the subject or title, then a blank line, then the body.
    - `agent` is your short name or the tool you run in, such as `Claude Code`. `run` names the loop, job, session or subagent, such as `nightly-digest` or `fix-rounding`. The reviewer often has several of these waiting, and the queue groups by them, so use the same spelling every time.
    - Write `context` as markdown in plain language, with these short headings: `## What this is` (one line naming the text and where it goes), `## Why` (the reason, and the ticket or thread it answers), `## Who reads it` (the audience and what they already know), `## What changed or history` (the change in a few bullets, or the earlier messages). Leave out a heading that has nothing to say. The reviewer reads it beside the text to check the text against it.
 2. Give the user the review link once, then call `wait_for_review` with the id until the status is no longer pending.

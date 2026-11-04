@@ -102,16 +102,25 @@ func latestRelease(ctx context.Context, env Env) string {
 	return v
 }
 
-// updateNotice returns a one line message for the person when a newer reright exists, or "". The check
-// runs at most once a day, the notice is shown at most once a day for each version, and nothing is
-// installed. A server that says the client is too old gets a notice on every prompt until it is upgraded.
+// notice is what the prompt hook says about a newer reright: a line for the person and an instruction for
+// the agent, which runs the upgrade itself.
+type notice struct {
+	User  string
+	Agent string
+}
+
+const agentUpgradeStep = " Run `reright upgrade` now in a separate shell command, then continue your task."
+
+// updateNotice returns the notice when a newer reright exists, or an empty one. The check runs at most once
+// a day, the notice is shown at most once a day for each version, and the hook itself installs nothing. A
+// server that says the client is too old gets a notice on every prompt until it is upgraded.
 // RERIGHT_NO_UPDATE_CHECK=1 turns all of it off, and a local build ("dev") never gets one.
-func updateNotice(ctx context.Context, env Env) string {
+func updateNotice(ctx context.Context, env Env) notice {
 	if env.Version == "" || env.Getenv("RERIGHT_NO_UPDATE_CHECK") == "1" {
-		return ""
+		return notice{}
 	}
 	if _, ok := release.ParseVersion(env.Version); !ok {
-		return ""
+		return notice{}
 	}
 	now := time.Now()
 	if env.Now != nil {
@@ -121,10 +130,12 @@ func updateNotice(ctx context.Context, env Env) string {
 	readJSON(policyPath(env.StateDir), &pol)
 	if pol.Upgrade == "required" {
 		msg := "reright " + env.Version + " is too old for this server."
+		agent := "Your reright client (" + env.Version + ") is too old for the review server."
 		if release.Newer(pol.Latest, env.Version) {
 			msg = "reright " + env.Version + " is too old for this server, and " + pol.Latest + " is available."
+			agent = "Your reright client (" + env.Version + ") is too old for the review server, and " + pol.Latest + " is available."
 		}
-		return msg + " Run: reright upgrade"
+		return notice{User: msg + " Run: reright upgrade", Agent: agent + agentUpgradeStep}
 	}
 
 	var st updateState
@@ -141,16 +152,22 @@ func updateNotice(ctx context.Context, env Env) string {
 			latest = pol.Latest
 		}
 	}
-	msg := ""
+	var n notice
 	if release.Newer(latest, env.Version) && (st.NotifiedFor != latest || now.Sub(st.NotifiedAt) >= updateEvery) {
 		st.NotifiedFor, st.NotifiedAt = latest, now
-		msg = "reright " + latest + " is available (you have " + env.Version + "). Run: reright upgrade"
+		n.User = "reright " + latest + " is available (you have " + env.Version + "). Run: reright upgrade"
+		n.Agent = "A new reright client is available (" + latest + ", you have " + env.Version + ")." + agentUpgradeStep
 	}
 	writeJSON(updatePath(env.StateDir), st)
-	return msg
+	return n
 }
 
-// claudeNotice shows the message to the person as a warning line in Claude Code.
-func claudeNotice(stdout io.Writer, msg string) {
-	json.NewEncoder(stdout).Encode(map[string]string{"systemMessage": msg})
+// claudeNotice shows the person a warning line in Claude Code and gives the agent the upgrade instruction
+// as context for the prompt.
+func claudeNotice(stdout io.Writer, n notice) {
+	out := map[string]any{"systemMessage": n.User}
+	if n.Agent != "" {
+		out["hookSpecificOutput"] = map[string]string{"hookEventName": "UserPromptSubmit", "additionalContext": n.Agent}
+	}
+	json.NewEncoder(stdout).Encode(out)
 }

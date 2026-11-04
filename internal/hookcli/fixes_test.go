@@ -183,7 +183,7 @@ func TestParseArgs(t *testing.T) {
 	if _, err := AgentFromArgs([]string{"--agnet", "x"}); err == nil {
 		t.Error("AgentFromArgs accepted a typo")
 	}
-	for sub, want := range map[string]int{"pre": 2, "": 2, "bogus": 2, "post": 1, "prompt": 1} {
+	for sub, want := range map[string]int{"pre": 2, "": 2, "bogus": 2, "post": 1, "prompt": 1, "stop": 1} {
 		if got := UsageExit(sub); got != want {
 			t.Errorf("UsageExit(%q) = %d, want %d", sub, got, want)
 		}

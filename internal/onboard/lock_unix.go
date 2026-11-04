@@ -42,3 +42,16 @@ func lockAt(path string) (func(), error) {
 		time.Sleep(25 * time.Millisecond)
 	}
 }
+
+// tryLockConfig takes the config lock only if it is free at once, for callers that must not wait.
+func tryLockConfig(p Paths) (func(), error) {
+	f, err := os.OpenFile(p.LockFile(), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		f.Close()
+		return nil, err
+	}
+	return func() { f.Close() }, nil
+}

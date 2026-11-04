@@ -15,3 +15,5 @@ func lockConfig(p Paths) (func(), error) {
 	}
 	return func() {}, nil
 }
+
+func tryLockConfig(p Paths) (func(), error) { return lockConfig(p) }

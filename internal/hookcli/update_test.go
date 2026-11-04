@@ -3,6 +3,7 @@ package hookcli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -47,18 +48,18 @@ func TestUpdateNoticeOncePerDay(t *testing.T) {
 	env := noticeEnv(t, stub, "v0.1.1", &now)
 	ctx := context.Background()
 
-	msg := updateNotice(ctx, env)
+	msg := updateNotice(ctx, env).User
 	if !strings.Contains(msg, "v0.1.2 is available") || !strings.Contains(msg, "reright upgrade") {
 		t.Fatalf("first notice %q", msg)
 	}
-	if again := updateNotice(ctx, env); again != "" {
+	if again := updateNotice(ctx, env).User; again != "" {
 		t.Fatalf("the same notice was shown twice in a day: %q", again)
 	}
 	if stub.hits != 1 {
 		t.Fatalf("the release was checked %d times in a day, want 1", stub.hits)
 	}
 	now = now.Add(25 * time.Hour)
-	if next := updateNotice(ctx, env); next == "" || stub.hits != 2 {
+	if next := updateNotice(ctx, env).User; next == "" || stub.hits != 2 {
 		t.Fatalf("a day later: notice %q, checks %d", next, stub.hits)
 	}
 }
@@ -74,7 +75,7 @@ func TestUpdateNoticeStaysQuietWhenCurrentOrUnknown(t *testing.T) {
 		"unreadable":  {"latest", "v0.1.1"},
 	} {
 		stub := newReleaseStub(t, c.latest)
-		if msg := updateNotice(context.Background(), noticeEnv(t, stub, c.version, &now)); msg != "" {
+		if msg := updateNotice(context.Background(), noticeEnv(t, stub, c.version, &now)).User; msg != "" {
 			t.Errorf("%s: unexpected notice %q", name, msg)
 		}
 	}
@@ -86,7 +87,7 @@ func TestUpdateNoticeStaysQuietWhenCurrentOrUnknown(t *testing.T) {
 		}
 		return ""
 	}
-	if msg := updateNotice(context.Background(), env); msg != "" || stub.hits != 0 {
+	if msg := updateNotice(context.Background(), env).User; msg != "" || stub.hits != 0 {
 		t.Errorf("the opt out was ignored: %q after %d checks", msg, stub.hits)
 	}
 }
@@ -95,7 +96,7 @@ func TestUpdateNoticeWhenTheReleaseIsUnreachable(t *testing.T) {
 	stub := newReleaseStub(t, "")
 	now := time.Date(2026, 10, 2, 9, 0, 0, 0, time.UTC)
 	env := noticeEnv(t, stub, "v0.1.1", &now)
-	if msg := updateNotice(context.Background(), env); msg != "" {
+	if msg := updateNotice(context.Background(), env).User; msg != "" {
 		t.Fatalf("notice without a release: %q", msg)
 	}
 	if updateNotice(context.Background(), env); stub.hits != 1 {
@@ -109,7 +110,7 @@ func TestServerPolicyRequiresAnUpgradeOnEveryPrompt(t *testing.T) {
 	env := noticeEnv(t, stub, "v0.1.1", &now)
 	WritePolicy(env.StateDir)("required", "v0.1.3")
 	for i := 0; i < 2; i++ {
-		msg := updateNotice(context.Background(), env)
+		msg := updateNotice(context.Background(), env).User
 		if !strings.Contains(msg, "too old for this server") || !strings.Contains(msg, "v0.1.3 is available") {
 			t.Fatalf("prompt %d: %q", i, msg)
 		}
@@ -124,7 +125,7 @@ func TestServerPolicyAvailableFeedsTheNotice(t *testing.T) {
 	now := time.Date(2026, 10, 2, 9, 0, 0, 0, time.UTC)
 	env := noticeEnv(t, stub, "v0.1.1", &now)
 	WritePolicy(env.StateDir)("available", "v0.1.4")
-	if msg := updateNotice(context.Background(), env); !strings.Contains(msg, "v0.1.4 is available") {
+	if msg := updateNotice(context.Background(), env).User; !strings.Contains(msg, "v0.1.4 is available") {
 		t.Fatalf("notice %q", msg)
 	}
 }
@@ -164,5 +165,75 @@ func TestPromptShowsTheNoticeToClaudeOnly(t *testing.T) {
 	env.StateDir = t.TempDir()
 	if code := RunAgent(context.Background(), AgentGemini, "prompt", strings.NewReader(in), &out, &errOut, env); code != 0 || out.Len() != 0 {
 		t.Fatalf("gemini got output %q (exit %d)", out.String(), code)
+	}
+}
+
+func TestPromptTellsTheAgentToUpgrade(t *testing.T) {
+	stub := newReleaseStub(t, "v0.1.2")
+	now := time.Date(2026, 10, 2, 9, 0, 0, 0, time.UTC)
+	env := noticeEnv(t, stub, "v0.1.1", &now)
+	in := `{"session_id":"s","cwd":"/","hook_event_name":"UserPromptSubmit","prompt":"hi"}`
+	prompt := func() string {
+		var out, errOut bytes.Buffer
+		if code := RunAgent(context.Background(), AgentClaude, "prompt", strings.NewReader(in), &out, &errOut, env); code != 0 {
+			t.Fatalf("exit %d: %s", code, errOut.String())
+		}
+		return out.String()
+	}
+	raw := prompt()
+	var got struct {
+		SystemMessage string `json:"systemMessage"`
+		H             struct {
+			Event   string `json:"hookEventName"`
+			Context string `json:"additionalContext"`
+		} `json:"hookSpecificOutput"`
+	}
+	if err := json.Unmarshal([]byte(raw), &got); err != nil {
+		t.Fatalf("output %q is not one JSON object: %v", raw, err)
+	}
+	want := "A new reright client is available (v0.1.2, you have v0.1.1). Run `reright upgrade` now in a separate shell command, then continue your task."
+	if got.H.Event != "UserPromptSubmit" || got.H.Context != want {
+		t.Fatalf("agent context %+v", got.H)
+	}
+	if !strings.Contains(got.SystemMessage, "v0.1.2 is available") {
+		t.Fatalf("person's line %q", got.SystemMessage)
+	}
+	if again := prompt(); strings.TrimSpace(again) != "" {
+		t.Fatalf("the agent was told twice in a day: %q", again)
+	}
+}
+
+func TestRequiredUpgradeTellsTheAgent(t *testing.T) {
+	stub := newReleaseStub(t, "")
+	now := time.Date(2026, 10, 2, 9, 0, 0, 0, time.UTC)
+	env := noticeEnv(t, stub, "v0.1.1", &now)
+	WritePolicy(env.StateDir)("required", "v0.1.3")
+	n := updateNotice(context.Background(), env)
+	if !strings.Contains(n.Agent, "too old") || !strings.Contains(n.Agent, "v0.1.3 is available") || !strings.Contains(n.Agent, "Run `reright upgrade` now") {
+		t.Fatalf("agent text %q", n.Agent)
+	}
+}
+
+func TestOptOutSilencesTheAgentToo(t *testing.T) {
+	stub := newReleaseStub(t, "v0.1.2")
+	now := time.Date(2026, 10, 2, 9, 0, 0, 0, time.UTC)
+	env := noticeEnv(t, stub, "v0.1.1", &now)
+	env.Getenv = func(k string) string {
+		if k == "RERIGHT_NO_UPDATE_CHECK" {
+			return "1"
+		}
+		return ""
+	}
+	if n := updateNotice(context.Background(), env); n != (notice{}) {
+		t.Fatalf("opt out ignored: %+v", n)
+	}
+}
+
+func TestPreLetsTheAgentRunTheUpgrade(t *testing.T) {
+	f := newFixture(t)
+	for _, cmd := range []string{"reright upgrade", "reright upgrade --check", "reright upgrade --force", "~/.local/bin/reright upgrade", "$HOME/.local/bin/reright upgrade"} {
+		if d, r := f.run(t, "pre", bash("s1", cmd)); d != "" {
+			t.Errorf("%q: decision %q reason %q", cmd, d, r)
+		}
 	}
 }

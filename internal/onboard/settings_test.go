@@ -70,7 +70,7 @@ func TestStripHooksRemovesOnlyOurs(t *testing.T) {
 	if strings.Contains(s, hookMarker) || !strings.Contains(s, `"mine"`) {
 		t.Fatalf("strip result:\n%s", s)
 	}
-	if strings.Contains(s, "PostToolUse") || strings.Contains(s, "UserPromptSubmit") {
+	if strings.Contains(s, "PostToolUse") || strings.Contains(s, "UserPromptSubmit") || strings.Contains(s, "Stop") {
 		t.Fatalf("empty events left behind:\n%s", s)
 	}
 }
@@ -99,12 +99,12 @@ func TestBadSettingsShapes(t *testing.T) {
 func TestMissingHooksReportsWhichAreAbsent(t *testing.T) {
 	out, _ := MergeHooks([]byte("{}"), hook)
 	missing, _ := MissingHooks(out, "/elsewhere/reright-hook")
-	if len(missing) != 3 {
+	if len(missing) != 4 {
 		t.Fatalf("missing %v", missing)
 	}
 	partial := `{"hooks": {"PreToolUse": [{"matcher": "*", "hooks": [{"type": "command", "command": "` + hook + ` pre"}]}]}}`
 	missing, _ = MissingHooks([]byte(partial), hook)
-	if len(missing) != 2 || !strings.Contains(missing[0], "PostToolUse") {
+	if len(missing) != 3 || !strings.Contains(missing[0], "PostToolUse") || missing[2] != "Stop (stop)" {
 		t.Fatalf("missing %v", missing)
 	}
 }

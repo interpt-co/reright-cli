@@ -155,3 +155,35 @@ func TestMatchersAndSingleCopilotFile(t *testing.T) {
 		t.Fatalf("copilot writes %d hook files", len(co))
 	}
 }
+
+func TestClaudeStopsOnlyWhenNothingIsPending(t *testing.T) {
+	snips, err := For(Claude, "/home/u/.local/bin/reright-hook")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg struct {
+		Hooks map[string][]struct {
+			Matcher string `json:"matcher"`
+			Hooks   []struct {
+				Command string `json:"command"`
+			} `json:"hooks"`
+		} `json:"hooks"`
+	}
+	if err := json.Unmarshal([]byte(snips[0].Content), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	stop := cfg.Hooks["Stop"]
+	if len(stop) != 1 || stop[0].Hooks[0].Command != "/home/u/.local/bin/reright-hook stop" {
+		t.Fatalf("Stop = %+v", stop)
+	}
+	post := cfg.Hooks["PostToolUse"]
+	if len(post) != 1 || post[0].Matcher != "mcp__reright__(submit_for_review|wait_for_review)" {
+		t.Fatalf("PostToolUse = %+v", post)
+	}
+	for _, agent := range []string{Codex, Gemini, Copilot, Cursor} {
+		s, _ := For(agent, "reright-hook")
+		if strings.Contains(s[0].Content, " stop") {
+			t.Errorf("%s got a stop hook, but its stop event is not verified", agent)
+		}
+	}
+}
