@@ -54,13 +54,13 @@ func (f *fixture) stop(t *testing.T, session string) stopOut {
 
 func submitResult(session, id string) map[string]any {
 	payload, _ := json.Marshal(map[string]string{"id": id, "review_url": "https://app.reright.it/review/" + id, "status": "pending", "instruction": "..."})
-	return map[string]any{"session_id": session, "hook_event_name": "PostToolUse", "tool_name": "mcp__reright__submit_for_review",
+	return map[string]any{"session_id": session, "hook_event_name": "PostToolUse", "tool_name": "mcp__reright__rewrite",
 		"tool_response": []any{map[string]any{"type": "text", "text": string(payload)}}}
 }
 
 func waitFor(session, id, status string) map[string]any {
 	payload, _ := json.Marshal(map[string]string{"id": id, "status": status, "instruction": "..."})
-	return map[string]any{"session_id": session, "hook_event_name": "PostToolUse", "tool_name": "mcp__reright__wait_for_review",
+	return map[string]any{"session_id": session, "hook_event_name": "PostToolUse", "tool_name": "mcp__reright__rewrite_result",
 		"tool_response": map[string]any{"content": []any{map[string]any{"type": "text", "text": string(payload)}}}}
 }
 
@@ -69,7 +69,7 @@ func TestStopBlocksWhileADraftIsPending(t *testing.T) {
 	f := stopFixture(t, &now)
 	f.run(t, "post", submitResult("s1", "d1"))
 	s := f.stop(t, "s1")
-	if s.Decision != "block" || !strings.Contains(s.Reason, "(id d1)") || !strings.Contains(s.Reason, "call wait_for_review(id d1)") {
+	if s.Decision != "block" || !strings.Contains(s.Reason, "(id d1)") || !strings.Contains(s.Reason, "call rewrite_result(id d1)") {
 		t.Fatalf("stop = %+v", s)
 	}
 	f.run(t, "post", waitFor("s1", "d1", "pending"))
@@ -163,31 +163,20 @@ func TestStopFailsOpen(t *testing.T) {
 	}
 }
 
-func TestStopOnlyBlocksForClaude(t *testing.T) {
-	now := time.Date(2026, 11, 4, 9, 0, 0, 0, time.UTC)
-	f := stopFixture(t, &now)
-	f.run(t, "post", submitResult("s1", "d1"))
-	for _, agent := range []string{AgentCodex, AgentGemini, AgentCopilot, AgentCursor} {
-		if out, code := f.runRaw(t, agent, "stop", map[string]any{"session_id": "s1"}); code != 0 || strings.TrimSpace(out) != "" {
-			t.Errorf("%s: code %d, out %q", agent, code, out)
-		}
-	}
-}
-
 func TestPostRecordsSubmitFromPluginAndStructuredContent(t *testing.T) {
 	now := time.Date(2026, 11, 4, 9, 0, 0, 0, time.UTC)
 	f := stopFixture(t, &now)
-	f.run(t, "post", map[string]any{"session_id": "s1", "tool_name": "mcp__plugin_reright_reright__submit_for_review",
+	f.run(t, "post", map[string]any{"session_id": "s1", "tool_name": "mcp__plugin_reright_reright__rewrite",
 		"tool_response": map[string]any{"structuredContent": map[string]any{"id": "p1", "status": "pending", "review_url": "https://x/p1"}}})
 	if s := f.stop(t, "s1"); s.Decision != "block" || !strings.Contains(s.Reason, "p1") {
 		t.Fatalf("plugin submit not recorded: %+v", s)
 	}
-	f.run(t, "post", map[string]any{"session_id": "s1", "tool_name": "mcp__plugin_reright_reright__wait_for_review",
+	f.run(t, "post", map[string]any{"session_id": "s1", "tool_name": "mcp__plugin_reright_reright__rewrite_result",
 		"tool_response": map[string]any{"structuredContent": map[string]any{"id": "p1", "status": "approved", "final_text": "x"}}})
 	if s := f.stop(t, "s1"); s != (stopOut{}) {
 		t.Fatalf("plugin wait did not clear: %+v", s)
 	}
-	f.run(t, "post", map[string]any{"session_id": "s1", "tool_name": "mcp__other__submit_for_review",
+	f.run(t, "post", map[string]any{"session_id": "s1", "tool_name": "mcp__other__rewrite",
 		"tool_response": map[string]any{"structuredContent": map[string]any{"id": "o1", "status": "pending"}}})
 	if s := f.stop(t, "s1"); s != (stopOut{}) {
 		t.Fatalf("another server's tool was recorded: %+v", s)
@@ -216,7 +205,7 @@ func TestStopUsageErrorsDoNotBlock(t *testing.T) {
 	}
 }
 
-func TestHealRunsForClaudeOnlyAndFailsOpen(t *testing.T) {
+func TestHealRunsAndFailsOpen(t *testing.T) {
 	f := newFixture(t)
 	calls := 0
 	f.env.Heal = func() { calls++; panic("boom") }
@@ -229,8 +218,35 @@ func TestHealRunsForClaudeOnlyAndFailsOpen(t *testing.T) {
 	if calls != 2 {
 		t.Fatalf("heal ran %d times for Claude, want 2", calls)
 	}
-	f.runRaw(t, AgentCodex, "prompt", map[string]any{"session_id": "s1"})
-	if calls != 2 {
-		t.Fatal("heal ran for Codex")
+}
+
+func rewriteCall(session, tool, id, status string) map[string]any {
+	payload, _ := json.Marshal(map[string]any{"id": id, "status": status, "final_text": "x", "rewritten": true, "instruction": "..."})
+	return map[string]any{"session_id": session, "hook_event_name": "PostToolUse", "tool_name": "mcp__reright__" + tool,
+		"tool_response": []any{map[string]any{"type": "text", "text": string(payload)}}}
+}
+
+func TestRewriteToolsTrackPendingDrafts(t *testing.T) {
+	now := time.Date(2026, 11, 5, 9, 0, 0, 0, time.UTC)
+	f := stopFixture(t, &now)
+	f.run(t, "post", rewriteCall("s1", "rewrite", "d1", "pending"))
+	if s := f.stop(t, "s1"); s.Decision != "block" || !strings.Contains(s.Reason, "rewrite_result(id d1)") {
+		t.Fatalf("a pending rewrite was not tracked: %+v", s)
+	}
+	f.run(t, "post", rewriteCall("s1", "rewrite_result", "d1", "approved"))
+	if s := f.stop(t, "s1"); s.Decision == "block" {
+		t.Fatalf("an approved rewrite_result left the draft pending: %+v", s)
+	}
+	f.run(t, "post", rewriteCall("s1", "rewrite", "d2", "approved"))
+	if s := f.stop(t, "s1"); s.Decision == "block" {
+		t.Fatalf("a rewrite that finished at once was tracked: %+v", s)
+	}
+}
+
+func TestRejectedRewriteLocksTheSession(t *testing.T) {
+	f := newFixture(t)
+	f.run(t, "post", rewriteCall("s1", "rewrite", "d1", "rejected"))
+	if _, err := os.Stat(filepath.Join(f.env.StateDir, "locks")); err != nil {
+		t.Fatalf("no lock after a rejected rewrite: %v", err)
 	}
 }

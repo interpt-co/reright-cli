@@ -12,15 +12,17 @@ import (
 	"github.com/interpt-co/reright-cli/internal/toggle"
 )
 
-const switchUsage = `       reright status
-       reright disable KIND... [--for DURATION] [--here | --dir PATH]...
-       reright enable KIND...
+var switchUsage = `       reright status
+       reright disable CHECK... [--for DURATION] [--here | --dir PATH]...
+       reright enable CHECK...
 
-kinds: ` + "commit, gh, email, browser, http" + `, or all. --for 2h switches them back on by itself; --here or --dir limits the switch-off to one directory tree.`
+checks: ` + checkNames + `, or all. --for 2h switches them back on by itself; --here or --dir limits the switch-off to one directory tree.`
+
+var checkNames = strings.Join(toggle.Checks, ", ")
 
 func configDir(home string) string { return filepath.Join(home, ".config", "reright") }
 
-// splitArgs separates kind names from flags so "disable commit --for 1h" and "disable --for 1h commit" both work.
+// splitArgs separates check names from flags so "disable commit --for 1h" and "disable --for 1h commit" both work.
 func splitArgs(args []string) (names []string, forDur string, dirs []string, here bool, err error) {
 	for i := 0; i < len(args); i++ {
 		a := args[i]
@@ -60,7 +62,7 @@ func splitArgs(args []string) (names []string, forDur string, dirs []string, her
 func runStatus(home string, stdout io.Writer, now time.Time) error {
 	f, err := toggle.Load(configDir(home))
 	if err != nil {
-		fmt.Fprintf(stdout, "warning: %v\nTreating every kind as on until it is fixed. `reright enable all` rewrites it.\n\n", err)
+		fmt.Fprintf(stdout, "warning: %v\nTreating every check as on until it is fixed. `reright enable all` rewrites it.\n\n", err)
 	}
 	for _, l := range f.Lines(now) {
 		fmt.Fprintln(stdout, l)
@@ -73,7 +75,7 @@ func runDisable(args []string, home string, stdout io.Writer, now time.Time) err
 	if err != nil {
 		return err
 	}
-	kinds, err := toggle.Expand(names)
+	checks, err := toggle.Expand(names)
 	if err != nil {
 		return err
 	}
@@ -99,17 +101,17 @@ func runDisable(args []string, home string, stdout io.Writer, now time.Time) err
 		}
 		dirs[i] = filepath.Clean(abs)
 	}
-	if err := toggle.Disable(configDir(home), kinds, until, dirs); err != nil {
+	if err := toggle.Disable(configDir(home), checks, until, dirs); err != nil {
 		return err
 	}
-	fmt.Fprintf(stdout, "Switched off: %s.\n", strings.Join(kinds, ", "))
+	fmt.Fprintf(stdout, "Switched off: %s.\n", strings.Join(checks, ", "))
 	f, _ := toggle.Load(configDir(home))
 	for _, l := range f.Lines(now) {
 		if strings.Contains(l, " OFF ") {
 			fmt.Fprintln(stdout, "  "+l)
 		}
 	}
-	fmt.Fprintln(stdout, "Takes effect in running sessions. Turn it back on with `reright enable "+strings.Join(kinds, " ")+"`.")
+	fmt.Fprintln(stdout, "Takes effect in running sessions. Turn it back on with `reright enable "+strings.Join(checks, " ")+"`.")
 	return nil
 }
 
@@ -119,15 +121,15 @@ func runEnable(args []string, home string, stdout io.Writer, now time.Time) erro
 		return err
 	}
 	if forDur != "" || len(dirs) > 0 || here {
-		return errors.New("enable takes only kind names")
+		return errors.New("enable takes only check names")
 	}
-	kinds, err := toggle.Expand(names)
+	checks, err := toggle.Expand(names)
 	if err != nil {
 		return err
 	}
-	if err := toggle.Enable(configDir(home), kinds, now); err != nil {
+	if err := toggle.Enable(configDir(home), checks, now); err != nil {
 		return err
 	}
-	fmt.Fprintf(stdout, "Switched on: %s.\n", strings.Join(kinds, ", "))
+	fmt.Fprintf(stdout, "Switched on: %s.\n", strings.Join(checks, ", "))
 	return nil
 }

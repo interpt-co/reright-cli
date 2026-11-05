@@ -4,7 +4,6 @@ go 1.26.0
 
 require (
 	github.com/modelcontextprotocol/go-sdk v1.8.0
-	github.com/pelletier/go-toml/v2 v2.4.3
 	mvdan.cc/sh/v3 v3.14.1
 )
 

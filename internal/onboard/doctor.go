@@ -42,7 +42,9 @@ const reinstallHint = "generate a new setup code on the dashboard and run rerigh
 
 const probeInput = `{"session_id":"reright-doctor","cwd":"/","tool_name":"Read","tool_input":{"file_path":"/dev/null"}}`
 
-const denyProbeInput = `{"session_id":"reright-doctor","cwd":"/","tool_name":"Bash","tool_input":{"command":"git commit -m x"}}`
+// denyProbeInput commits a message in plain words, because the hook lets text that is not free text,
+// such as "x" or a version, through without asking the server.
+const denyProbeInput = `{"session_id":"reright-doctor","cwd":"/","tool_name":"Bash","tool_input":{"command":"git commit -m 'reright doctor checks that this commit is blocked'"}}`
 
 type doctor struct {
 	o      DoctorOptions
@@ -119,7 +121,7 @@ func Doctor(ctx context.Context, o DoctorOptions) []Check {
 	configOK := d.add("config", configProblem(p, tok, server), fmt.Sprintf("token and server URL found for %s", server))
 	if configOK {
 		d.add("server", checkServer(ctx, o.HTTP, server, tok), "the server accepts this device token")
-		d.add("mcp", checkMCP(ctx, server, tok), "the MCP endpoint lists submit_for_review and wait_for_review")
+		d.add("mcp", checkMCP(ctx, server, tok), "the MCP endpoint lists the reright tools")
 	}
 
 	m, hadManifest, _ := loadManifest(p)
@@ -140,22 +142,23 @@ func Doctor(ctx context.Context, o DoctorOptions) []Check {
 	}
 
 	d.skippedAgents(agents, env)
-	d.git(m, hadManifest)
+	d.legacyAgents(m)
+	d.git()
 	d.environment()
 	d.projectFiles(agents)
 	return d.checks
 }
 
 func doctorAgents(o DoctorOptions, m Manifest, had bool) ([]string, error) {
-	requested, err := normalizeAgents(o.Agents)
+	requested, err := normalizeAgents(o.Agents, false)
 	if err != nil {
 		return nil, err
 	}
 	if len(requested) > 0 {
 		return requested, nil
 	}
-	if had && len(m.Agents) > 0 {
-		return m.agentNames(), nil
+	if had && m.Agents[agentClaude] != nil {
+		return []string{agentClaude}, nil
 	}
 	var out []string
 	for _, n := range agentOrder {
@@ -176,17 +179,13 @@ func (d *doctor) agent(ctx context.Context, name string, env planEnv) {
 		return
 	}
 	fixHint := "run reright install --agent " + name + " with a new setup code"
-	for _, kind := range []string{"hooks", "mcp", "rules"} {
-		label := map[string]string{"hooks": " hooks", "mcp": " mcp entry", "rules": " rules"}[kind]
-		if kind == "mcp" && plan.ClaudeMCP {
+	for _, check := range []string{"hooks", "mcp", "rules"} {
+		label := map[string]string{"hooks": " hooks", "mcp": " mcp entry", "rules": " rules"}[check]
+		if check == "mcp" && plan.ClaudeMCP {
 			d.add(name+label, checkRegistered(ctx, d.o.Runner), "claude knows the reright MCP server")
 			continue
 		}
-		edits := partsOfKind(plan, kind)
-		if kind == "rules" && len(edits) == 0 && len(plan.Manual) > 0 {
-			d.warn(name+label, "cannot be checked because the rules live in the agent's settings", "make sure the text from reright install --dry-run is pasted there")
-			continue
-		}
+		edits := partsOfKind(plan, check)
 		var problems, where []string
 		for _, e := range edits {
 			raw, exists, err := readOptional(e.Path)
@@ -204,7 +203,7 @@ func (d *doctor) agent(ctx context.Context, name string, env planEnv) {
 			}
 			where = append(where, e.Path)
 		}
-		if kind == "hooks" {
+		if check == "hooks" {
 			if why := hooksSwitchedOff(name, d.o.Home); why != "" {
 				problems = append(problems, why)
 			}
@@ -221,35 +220,10 @@ func (d *doctor) agent(ctx context.Context, name string, env planEnv) {
 			cerr = errors.New(strings.Join(problems, "; "))
 		}
 		detail := "found in " + strings.Join(where, ", ")
-		if kind == "hooks" {
-			detail = "all hook commands present with --agent " + name + " in " + strings.Join(where, ", ")
-			if name == agentClaude {
-				detail = "all three hooks point at " + env.HookPath
-			}
+		if check == "hooks" {
+			detail = "every hook points at " + env.HookPath
 		}
 		d.addFix(name+label, cerr, detail, fixHint)
-	}
-	if name == agentCodex {
-		raw, _, _ := readOptional(filepath.Join(d.o.Home, ".codex", "config.toml"))
-		var err error
-		if codexHooksDisabled(raw) {
-			err = errors.New("~/.codex/config.toml turns hooks off under [features], so Codex ignores the reright hooks")
-		}
-		d.addFix("codex hooks enabled", err, "hooks are not turned off in ~/.codex/config.toml", "remove the hooks = false line under [features]")
-		if _, err := os.Stat(filepath.Join(d.o.Home, ".codex", "AGENTS.override.md")); err == nil {
-			d.warn("codex rules", "~/.codex/AGENTS.override.md exists, and Codex reads it instead of AGENTS.md, so the reright rules may not load", "add the rule block to AGENTS.override.md or remove that file")
-		}
-		if v := os.Getenv("CODEX_HOME"); v != "" {
-			d.warn("codex home", "CODEX_HOME is set to "+v+", but reright writes to ~/.codex", "copy the reright entries into that directory or unset CODEX_HOME")
-		}
-	}
-	if name == agentCopilot {
-		if v := os.Getenv("COPILOT_HOME"); v != "" {
-			d.warn("copilot home", "COPILOT_HOME is set to "+v+", but reright writes to ~/.copilot", "copy the reright entries into that directory or unset COPILOT_HOME")
-		}
-	}
-	for _, u := range agentSpecs[name].Unverified {
-		d.warn(name+" unverified", u, "")
 	}
 }
 
@@ -286,36 +260,17 @@ func (d *doctor) skippedAgents(configured []string, env planEnv) {
 }
 
 func hooksSwitchedOff(agent, home string) string {
-	var path string
-	switch agent {
-	case agentClaude:
-		path = filepath.Join(home, ".claude", "settings.json")
-	case agentGemini:
-		path = filepath.Join(home, ".gemini", "settings.json")
-	default:
+	if agent != agentClaude {
 		return ""
 	}
+	path := filepath.Join(home, ".claude", "settings.json")
 	raw, _, _ := readOptional(path)
 	m, err := decodeSettings(raw)
 	if err != nil {
 		return ""
 	}
-	switch agent {
-	case agentClaude:
-		if v, _ := m["disableAllHooks"].(bool); v {
-			return path + " sets disableAllHooks to true, so Claude Code ignores every hook"
-		}
-	case agentGemini:
-		if cfg, ok := m["hooksConfig"].(map[string]any); ok {
-			if v, isBool := cfg["enabled"].(bool); isBool && !v {
-				return path + " sets hooksConfig.enabled to false, so Gemini CLI ignores every hook"
-			}
-		}
-		if tools, ok := m["tools"].(map[string]any); ok {
-			if v, isBool := tools["enableHooks"].(bool); isBool && !v {
-				return path + " sets tools.enableHooks to false, so Gemini CLI ignores every hook"
-			}
-		}
+	if v, _ := m["disableAllHooks"].(bool); v {
+		return path + " sets disableAllHooks to true, so Claude Code ignores every hook"
 	}
 	return ""
 }
@@ -344,48 +299,39 @@ func configuredPreCommand(home string) string {
 	return ""
 }
 
-func (d *doctor) git(m Manifest, had bool) {
-	info, err := githook.Status(d.o.Home)
-	switch {
-	case err != nil:
-		d.addFix("git layer", err, "", "check that git is installed")
-	case had && m.Git == "skipped":
-		d.warn("git layer", "skipped at install with --no-git, so commits made outside agent hooks are not checked", "run reright install again without --no-git")
-	case had && m.Git == "manual" && !info.Active:
-		d.warn("git layer", "your global core.hooksPath is "+info.GlobalHooksPath+", so the wrappers are not active", "add the two lines that install printed to the hook files in that directory")
-	case !info.Installed || len(info.Missing) > 0:
-		d.addFix("git layer", errors.New("the git wrappers are not installed in "+info.HooksDir), "", "run reright install again (it installs the git layer unless you pass --no-git)")
-	case !info.Active:
-		d.addFix("git layer", fmt.Errorf("git does not use the wrappers: core.hooksPath is %q", info.GlobalHooksPath), "", "run git config --global core.hooksPath "+info.HooksDir)
-	case info.Mode == "off":
-		d.warn("git layer", "installed and active, but mode is off in ~/.config/reright/git.json, so no commit is checked", "set mode to agents or always")
-	default:
-		detail := "active through core.hooksPath " + info.HooksDir + ", mode " + info.Mode + ". Limits: a repository with its own core.hooksPath (husky and similar) bypasses the layer, and doctor can only see the repository it runs in"
-		if info.Mode != githook.ModeAlways && info.TTYHeuristic {
-			detail += ". Commits with no terminal (IDEs, git GUIs) are checked like agent commits when the server answers and pass when it does not. Set \"tty_heuristic\": false in ~/.config/reright/git.json to stop checking them"
-		}
-		d.emit(Check{Name: "git layer", OK: true, Detail: detail})
-		d.repoHooksPath(info)
+// legacyAgents warns about agents an earlier version set up and this one no longer checks.
+func (d *doctor) legacyAgents(m Manifest) {
+	if len(d.o.Agents) > 0 {
+		return
+	}
+	for _, name := range m.legacyNames() {
+		d.warn(name, "was set up by an earlier reright, which no longer supports it, so its hooks are not checked and may block its tool calls", "run reright uninstall --agent "+name+" to remove what was written for it")
 	}
 }
 
-func (d *doctor) repoHooksPath(info githook.Info) {
-	dir := d.o.Dir
-	if dir == "" {
-		dir, _ = os.Getwd()
+// git reports a git layer that an earlier version installed and that is still there.
+func (d *doctor) git() {
+	if !githook.Present(d.o.Home) {
+		return
 	}
-	if local := githook.RepoHooksPath(dir); local != "" {
-		d.warn("git layer here", "this repository sets its own core.hooksPath ("+local+"), so git does not use the reright wrappers here and commits in it are not checked by the git layer", "rely on the agent hooks in this repository, or add the two reright lines to the hook files in "+local+" (see docs/agents/git-layer.md)")
+	info, err := githook.Status(d.o.Home)
+	switch {
+	case err != nil:
+		d.warn("git layer", "an earlier reright installed git hooks in "+info.HooksDir+", and reading the git config failed: "+err.Error(), "run reright upgrade to remove them")
+	case info.Active:
+		d.warn("git layer", "the global core.hooksPath still points at the git hooks an earlier reright installed in "+info.HooksDir+". reright no longer uses them", "run reright upgrade to remove them and put core.hooksPath back")
+	default:
+		d.warn("git layer", "files of the git layer an earlier reright installed are still in "+info.HooksDir, "run reright upgrade to remove them")
 	}
 }
 
 func (d *doctor) environment() {
 	f, err := toggle.Load(filepath.Join(d.o.Home, ".config", "reright"))
 	if err != nil {
-		d.warn("switches", err.Error()+", so every kind is checked", "run reright enable all to rewrite it")
+		d.warn("switches", err.Error()+", so every check is checked", "run reright enable all to rewrite it")
 	}
 	now := time.Now()
-	for _, k := range toggle.Kinds {
+	for _, k := range toggle.Checks {
 		if f.Off(k, "", now) || (f.Disabled[k].Until.IsZero() || now.Before(f.Disabled[k].Until)) && len(f.Disabled[k].Dirs) > 0 {
 			if _, on := f.Disabled[k]; on {
 				d.warn("switches", k+" checks are switched off", "reright status shows how long; reright enable "+k+" turns them back on")
@@ -526,12 +472,10 @@ func checkMCP(ctx context.Context, server, tok string) error {
 	for _, t := range tools.Tools {
 		found[t.Name] = true
 	}
-	for _, want := range []string{"submit_for_review", "wait_for_review"} {
-		if !found[want] {
-			return withFix("check that the server is up to date", "the MCP server has no %s tool", want)
-		}
+	if found["rewrite"] && found["rewrite_result"] {
+		return nil
 	}
-	return nil
+	return withFix("check that the server is up to date", "the MCP server does not have the rewrite and rewrite_result tools")
 }
 
 type fakeChecker struct {
@@ -648,7 +592,7 @@ func checkHookBinary(ctx context.Context, hook, home string) error {
 		}
 		out, err = runProbe(ctx, env, denyProbeInput, hook, "pre")
 		if !denied(out, err) {
-			return withFix(reinstallHint, "%s did not block git commit -m x, which no reviewer approved (output %q, result %v). It is not the real reright-hook, or it cannot check the server", hook, out, err)
+			return withFix(reinstallHint, "%s did not block a test commit that no reviewer approved (output %q, result %v). It is not the real reright-hook, or it cannot check the server", hook, out, err)
 		}
 		return nil
 	})
@@ -658,7 +602,7 @@ func checkConfiguredPreCommand(ctx context.Context, command string) error {
 	return withProbe(ctx, func(env []string) error {
 		out, err := runProbe(ctx, env, denyProbeInput, "/bin/sh", "-c", command)
 		if !denied(out, err) {
-			return withFix(reinstallHint, "the configured hook command %q did not block git commit -m x when run through sh -c (output %q, result %v)", command, out, err)
+			return withFix(reinstallHint, "the configured hook command %q did not block a test commit when run through sh -c (output %q, result %v)", command, out, err)
 		}
 		return nil
 	})

@@ -12,6 +12,78 @@ const stateFile = "enforcement.json"
 
 var disableOrEnable = regexp.MustCompile(`(?i)\b(disable|enable)\b`)
 
+// The switch guard still looks inside bash -c, eval and inline interpreter code, because an agent that
+// turns the checks off that way would get past every other check.
+var (
+	interpreterRe = regexp.MustCompile(`^(python[0-9.]*|node|nodejs|perl|ruby|php|deno|bun|lua|Rscript)$`)
+	shells        = map[string]bool{"bash": true, "sh": true, "zsh": true, "dash": true, "ksh": true, "fish": true}
+)
+
+const maxDepth = 5
+
+// guardWrappers are the commands the switch guard looks through. It is a longer list than the one the text
+// checks use, because running reright disable through xargs or watch still turns the checks off.
+var guardWrappers = map[string]map[string]bool{
+	"xargs":   {"-I": true, "-n": true, "-P": true, "-d": true, "-L": true, "-E": true, "-s": true, "-a": true, "-i": false},
+	"flock":   {"-w": true, "-E": true},
+	"watch":   {"-n": true, "--interval": true},
+	"busybox": {},
+	"runuser": {"-u": true, "-g": true, "-G": true},
+}
+
+func init() {
+	for name, flags := range wrapperFlagsWithValue {
+		guardWrappers[name] = flags
+	}
+}
+
+// stripGuardWrapper is stripWrapper over guardWrappers. timeout and flock take one positional argument
+// (the duration, the lock file) before the command.
+func stripGuardWrapper(name string, args []arg) []arg {
+	valued := guardWrappers[name]
+	i := 0
+	positional := 0
+	if name == "timeout" || name == "flock" {
+		positional = 1
+	}
+	for i < len(args) {
+		a := args[i]
+		if !a.ok {
+			break
+		}
+		switch {
+		case a.s == "--":
+			return args[i+1:]
+		case strings.HasPrefix(a.s, "-") && len(a.s) > 1:
+			if valued[a.s] {
+				i++
+			}
+			i++
+		case name == "env" && strings.Contains(a.s, "=") && !strings.HasPrefix(a.s, "="):
+			i++
+		case positional > 0:
+			positional--
+			i++
+		default:
+			return args[i:]
+		}
+	}
+	if i > len(args) {
+		i = len(args)
+	}
+	return args[i:]
+}
+
+func inlineFlag(s string, letters string) bool {
+	if len(s) < 2 || s[0] != '-' {
+		return false
+	}
+	if s[1] == '-' {
+		return s == "--eval" || s == "--print" || s == "--command"
+	}
+	return strings.ContainsRune(letters, rune(s[len(s)-1]))
+}
+
 // SwitchCommand reports whether a shell command would change reright's on/off switches: it runs
 // `reright disable` or `reright enable`, or it names the state file as a path. Only the user may do
 // that, so the hook refuses it when an agent tries. Text that merely mentions those words, in a
@@ -59,10 +131,10 @@ func switchCall(command string, call *syntax.CallExpr, depth int) bool {
 	// strip wrappers such as sudo and env, keeping the texts in step
 	for len(args) > 0 && args[0].ok {
 		name := path.Base(args[0].s)
-		if _, wrapper := wrapperFlagsWithValue[name]; !wrapper {
+		if _, wrapper := guardWrappers[name]; !wrapper {
 			break
 		}
-		rest := stripWrapper(name, args[1:])
+		rest := stripGuardWrapper(name, args[1:])
 		cut := len(args) - len(rest)
 		args, texts = args[cut:], texts[cut:]
 	}

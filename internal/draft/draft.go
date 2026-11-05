@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/base32"
 	"encoding/hex"
+	"slices"
 	"strings"
 	"time"
 	"unicode"
@@ -25,43 +26,9 @@ const (
 	KindOther    Kind = "other"
 )
 
-// Older kinds. Agents set up before the kinds were reduced still send them, and drafts already stored
-// carry them. They are accepted and shown as the kind they stand for now.
-const (
-	KindCommit      Kind = "commit"
-	KindPR          Kind = "pr"
-	KindPRComment   Kind = "pr_comment"
-	KindCodeComment Kind = "code_comment"
-	KindOdooLogNote Kind = "odoo_log_note"
-	KindOdooMessage Kind = "odoo_message"
-	KindChat        Kind = "chat"
-)
-
 var Kinds = []Kind{KindEmail, KindMessage, KindPost, KindDocument, KindCode, KindOther}
 
-var legacyKinds = map[Kind]Kind{
-	KindCommit:      KindCode,
-	KindPR:          KindCode,
-	KindPRComment:   KindCode,
-	KindCodeComment: KindCode,
-	KindOdooLogNote: KindMessage,
-	KindOdooMessage: KindMessage,
-	KindChat:        KindMessage,
-}
-
-// Canonical returns the current kind for k: an older kind becomes the kind it stands for, and a current
-// kind is returned as it is.
-func (k Kind) Canonical() Kind {
-	if c, ok := legacyKinds[k]; ok {
-		return c
-	}
-	return k
-}
-
 func (k Kind) Valid() bool {
-	if _, ok := legacyKinds[k]; ok {
-		return true
-	}
 	for _, v := range Kinds {
 		if k == v {
 			return true
@@ -73,7 +40,7 @@ func (k Kind) Valid() bool {
 // HasTitle reports whether the first line of this kind's text can be a title or subject.
 func (k Kind) HasTitle() bool {
 	switch k {
-	case KindEmail, KindCode, KindCommit, KindPR:
+	case KindEmail, KindCode:
 		return true
 	}
 	return false
@@ -92,7 +59,7 @@ func Sections(k Kind, text string) []Section {
 	if k.HasTitle() {
 		if title, body, ok := SplitTitle(text); ok {
 			first, second := "Title", "Description"
-			if k.Canonical() == KindEmail {
+			if k == KindEmail {
 				first, second = "Subject", "Body"
 			}
 			if body == "" {
@@ -122,6 +89,10 @@ const (
 	StatusApproved Status = "approved"
 	StatusRejected Status = "rejected"
 	StatusExpired  Status = "expired"
+	// StatusPassed is a text passed through without a rewrite, because the
+	// monthly quota was used up or it is not free text. Its row holds no text,
+	// only the note and the approval hashes.
+	StatusPassed Status = "passed"
 )
 
 const (
@@ -131,29 +102,37 @@ const (
 	VoiceTimeout   = "timeout"
 	VoiceSkipped   = "skipped"
 	DecidedByVoice = "voice"
+	// DecidedByAgent marks a rewrite the agent swapped back for its own text
+	// with keep_original.
+	DecidedByAgent = "agent"
 )
 
 type Draft struct {
-	ID           string    `json:"id"`
-	Kind         Kind      `json:"kind"`
-	Text         string    `json:"text"`
-	Context      string    `json:"context"`
-	Diff         string    `json:"diff,omitempty"`
-	Target       string    `json:"target"`
-	Origin       string    `json:"origin,omitempty"`
-	Agent        string    `json:"agent,omitempty"`
-	Run          string    `json:"run,omitempty"`
-	Status       Status    `json:"status"`
-	FinalText    string    `json:"final_text,omitempty"`
-	RejectReason string    `json:"reject_reason,omitempty"`
-	Suggestion   string    `json:"suggestion,omitempty"`
-	VoiceNote    string    `json:"voice_note,omitempty"`
-	VoiceState   string    `json:"voice_state,omitempty"`
-	DecidedBy    string    `json:"decided_by,omitempty"`
-	CreatedAt    time.Time `json:"created_at"`
-	DecidedAt    time.Time `json:"decided_at"`
-	Purged       bool      `json:"purged,omitempty"`
-	Seq          int64     `json:"-"`
+	ID           string `json:"id"`
+	Kind         Kind   `json:"kind"`
+	Text         string `json:"text"`
+	Context      string `json:"context"`
+	Diff         string `json:"diff,omitempty"`
+	Target       string `json:"target"`
+	Origin       string `json:"origin,omitempty"`
+	Agent        string `json:"agent,omitempty"`
+	Run          string `json:"run,omitempty"`
+	Status       Status `json:"status"`
+	FinalText    string `json:"final_text,omitempty"`
+	RejectReason string `json:"reject_reason,omitempty"`
+	Suggestion   string `json:"suggestion,omitempty"`
+	// Template is the fixed text around the agent's words, with Placeholder
+	// where they go. Text, Suggestion and FinalText hold only the words.
+	Template   string `json:"template,omitempty"`
+	VoiceNote  string `json:"voice_note,omitempty"`
+	VoiceState string `json:"voice_state,omitempty"`
+	DecidedBy  string `json:"decided_by,omitempty"`
+	// KeptReason is what the agent said changed when it kept its own text.
+	KeptReason string    `json:"kept_reason,omitempty"`
+	CreatedAt  time.Time `json:"created_at"`
+	DecidedAt  time.Time `json:"decided_at"`
+	Purged     bool      `json:"purged,omitempty"`
+	Seq        int64     `json:"-"`
 }
 
 var idEncoding = base32.StdEncoding.WithPadding(base32.NoPadding)
@@ -208,6 +187,37 @@ func SplitTitle(s string) (title, body string, ok bool) {
 // ApprovalHashes lists the hashes that count as approved once final is
 // approved. Kinds with a title also approve the title and the body on their
 // own, so `gh pr edit --title` or `--body` pass separately.
+// Placeholder marks where the agent's words go in a template.
+const Placeholder = "{{text}}"
+
+// ValidTemplate reports whether t is empty or holds Placeholder exactly once.
+func ValidTemplate(t string) bool {
+	return t == "" || strings.Count(t, Placeholder) == 1
+}
+
+// Fill puts words in place of the placeholder. Without a template it returns words.
+func Fill(template, words string) string {
+	if template == "" {
+		return words
+	}
+	return strings.Replace(template, Placeholder, words, 1)
+}
+
+// HashesFor lists the approval hashes of final in a draft: those of the words
+// alone and, with a template, those of the filled template too.
+func HashesFor(k Kind, template, final string) []string {
+	hashes := ApprovalHashes(k, final)
+	if template == "" {
+		return hashes
+	}
+	for _, h := range ApprovalHashes(k, Fill(template, final)) {
+		if !slices.Contains(hashes, h) {
+			hashes = append(hashes, h)
+		}
+	}
+	return hashes
+}
+
 func ApprovalHashes(k Kind, final string) []string {
 	hashes := []string{Hash(final)}
 	if !k.HasTitle() {

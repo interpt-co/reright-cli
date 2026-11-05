@@ -58,16 +58,16 @@ func TestSplitTitle(t *testing.T) {
 
 func TestApprovalHashes(t *testing.T) {
 	full := "Subject\n\nBody"
-	got := ApprovalHashes(KindCommit, full)
+	got := ApprovalHashes(KindCode, full)
 	want := []string{Hash(full), Hash("Subject"), Hash("Body")}
 	if !slices.Equal(got, want) {
-		t.Errorf("commit hashes = %v, want %v", got, want)
+		t.Errorf("code hashes = %v, want %v", got, want)
 	}
-	if got := ApprovalHashes(KindPRComment, full); !slices.Equal(got, []string{Hash(full)}) {
-		t.Errorf("pr_comment should only hash the full text, got %v", got)
+	if got := ApprovalHashes(KindMessage, full); !slices.Equal(got, []string{Hash(full)}) {
+		t.Errorf("a message should only hash the full text, got %v", got)
 	}
-	if got := ApprovalHashes(KindPR, "Title only"); !slices.Equal(got, []string{Hash("Title only")}) {
-		t.Errorf("title-only pr should hash once, got %v", got)
+	if got := ApprovalHashes(KindCode, "Title only"); !slices.Equal(got, []string{Hash("Title only")}) {
+		t.Errorf("title-only code should hash once, got %v", got)
 	}
 }
 
@@ -80,7 +80,7 @@ func TestKindValid(t *testing.T) {
 	if Kind("tweet").Valid() {
 		t.Error("unknown kind reported valid")
 	}
-	if !KindEmail.HasTitle() || KindChat.HasTitle() {
+	if !KindEmail.HasTitle() || KindMessage.HasTitle() {
 		t.Error("HasTitle wrong")
 	}
 }

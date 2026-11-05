@@ -149,7 +149,7 @@ func TestCheckerSendsItsVersionAndRecordsThePolicy(t *testing.T) {
 	}
 }
 
-func TestPromptShowsTheNoticeToClaudeOnly(t *testing.T) {
+func TestPromptShowsTheNotice(t *testing.T) {
 	stub := newReleaseStub(t, "v0.1.2")
 	now := time.Date(2026, 10, 2, 9, 0, 0, 0, time.UTC)
 	env := noticeEnv(t, stub, "v0.1.1", &now)
@@ -160,11 +160,6 @@ func TestPromptShowsTheNoticeToClaudeOnly(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), `"systemMessage"`) || !strings.Contains(out.String(), "reright upgrade") {
 		t.Fatalf("claude output %q", out.String())
-	}
-	out.Reset()
-	env.StateDir = t.TempDir()
-	if code := RunAgent(context.Background(), AgentGemini, "prompt", strings.NewReader(in), &out, &errOut, env); code != 0 || out.Len() != 0 {
-		t.Fatalf("gemini got output %q (exit %d)", out.String(), code)
 	}
 }
 

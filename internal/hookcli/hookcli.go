@@ -1,4 +1,4 @@
-// Package hookcli implements the hook subcommands of reright-hook for Claude Code and other agents.
+// Package hookcli implements the hook subcommands of reright-hook for Claude Code.
 package hookcli
 
 import (
@@ -51,16 +51,19 @@ type lock struct {
 }
 
 // Run executes one hook subcommand for Claude Code: pre (PreToolUse), post
-// (PostToolUse on submit_for_review and wait_for_review), prompt (UserPromptSubmit)
+// (PostToolUse on rewrite and rewrite_result), prompt (UserPromptSubmit)
 // or stop (Stop). Decisions go
 // to stdout as hook JSON; the exit code is 0 unless the subcommand is unknown.
 func Run(ctx context.Context, sub string, stdin io.Reader, stdout, stderr io.Writer, env Env) int {
 	return RunAgent(ctx, AgentClaude, sub, stdin, stdout, stderr, env)
 }
 
-// RunAgent is Run for any supported agent. The payload is read in that agent's
-// shape and decisions are written in that agent's deny format.
+// RunAgent is Run with the agent named by --agent. Claude Code is the only one.
 func RunAgent(ctx context.Context, agent, sub string, stdin io.Reader, stdout, stderr io.Writer, env Env) int {
+	if legacyAgents[agent] {
+		fmt.Fprintf(stderr, "reright-hook: reright no longer supports %s, so this call was let through. Run reright uninstall --agent %s to remove the old hook config.\n", agent, agent)
+		return 0
+	}
 	ad, ok := adapters[agent]
 	if !ok {
 		fmt.Fprintf(stderr, "reright-hook: unknown agent %q (want %s)\n", agent, strings.Join(Agents(), ", "))
@@ -80,13 +83,13 @@ func RunAgent(ctx context.Context, agent, sub string, stdin io.Reader, stdout, s
 			return ad.deny(stdout, stderr, c, reason)
 		}
 	case "post":
-		if decodeErr == nil && isWaitForReview(c.Tool) {
+		if decodeErr == nil && (isRewriteResult(c.Tool) || isRewrite(c.Tool)) {
 			post(c, stderr, env)
 			if err := recordWait(c, env); err != nil {
 				fmt.Fprintln(stderr, "reright-hook:", err)
 			}
 		}
-		if decodeErr == nil && isSubmitForReview(c.Tool) {
+		if decodeErr == nil && isRewrite(c.Tool) {
 			if err := recordSubmit(c, env); err != nil {
 				fmt.Fprintln(stderr, "reright-hook:", err)
 			}
@@ -100,9 +103,6 @@ func RunAgent(ctx context.Context, agent, sub string, stdin io.Reader, stdout, s
 		if decodeErr == nil {
 			os.Remove(lockPath(env.StateDir, c))
 		}
-		if ad.promptOK != nil {
-			ad.promptOK(stdout)
-		}
 		if ad.notice != nil {
 			if n := updateNotice(ctx, env); n.User != "" {
 				ad.notice(stdout, n)
@@ -112,7 +112,7 @@ func RunAgent(ctx context.Context, agent, sub string, stdin io.Reader, stdout, s
 		fmt.Fprintf(stderr, "reright-hook: unknown subcommand %q (want pre, post, prompt or stop)\n", sub)
 		return UsageExit("")
 	}
-	if agent == AgentClaude && env.Heal != nil {
+	if env.Heal != nil {
 		heal(env.Heal)
 	}
 	return 0
@@ -167,6 +167,11 @@ func pre(ctx context.Context, in call, env Env) string {
 		if k := t.Kind(); k != "" && off(k) {
 			continue
 		}
+		// The rule asks agents to send only free text through reright, so a version, a URL, a name or code goes
+		// out as it is. A title and body come as one text and are judged together.
+		if !draft.IsFreeText(t.Value) {
+			continue
+		}
 		ok, err := env.Checker.Approved(ctx, draft.Hash(t.Value))
 		if err != nil {
 			if env.Getenv("RERIGHT_OFFLINE") == "allow" {
@@ -175,7 +180,7 @@ func pre(ctx context.Context, in call, env Env) string {
 			return fmt.Sprintf("reright: could not reach the review server to check the %s (%v). Nothing was sent. Tell the user; they can set RERIGHT_OFFLINE=allow to work offline.", t.Source, err)
 		}
 		if !ok {
-			return fmt.Sprintf("reright: the %s was not approved. Call the reright tool submit_for_review with this exact text and its context, wait with wait_for_review until it is approved, then run this again using final_text exactly as returned.", t.Source)
+			return fmt.Sprintf("reright: the %s did not go through reright. Call the reright tool rewrite with this exact text and its context, wait for it to finish, then run this again using final_text exactly as returned.", t.Source)
 		}
 	}
 	return ""
@@ -183,7 +188,7 @@ func pre(ctx context.Context, in call, env Env) string {
 
 // switchedOff returns a lookup for the user's on/off switches. A missing file means everything is on.
 // A damaged file also means everything is on: when in doubt the hook checks.
-func switchedOff(env Env, cwd string) func(kind string) bool {
+func switchedOff(env Env, cwd string) func(check string) bool {
 	if env.ConfigDir == "" {
 		return func(string) bool { return false }
 	}
@@ -196,35 +201,35 @@ func switchedOff(env Env, cwd string) func(kind string) bool {
 		now = env.Now
 	}
 	t := now()
-	return func(kind string) bool { return f.Off(kind, cwd, t) }
+	return func(check string) bool { return f.Off(check, cwd, t) }
 }
 
-// waived reports whether every kind a problem call might touch is switched off.
-func waived(off func(string) bool, kinds []string) bool {
+// waived reports whether every check a problem call might touch is switched off.
+func waived(off func(string) bool, checks []string) bool {
 	every := true
-	for _, k := range toggle.Kinds {
+	for _, k := range toggle.Checks {
 		every = every && off(k)
 	}
 	if every {
-		return true // "reright disable all" is the master switch, for calls no single kind describes
+		return true // "reright disable all" is the master switch, for calls no single check describes
 	}
-	for _, k := range kinds {
+	for _, k := range checks {
 		if k == "" || !off(k) {
 			return false
 		}
 	}
-	return len(kinds) > 0
+	return len(checks) > 0
 }
 
 // switchHint tells the agent what to pass on to the user when a call it cannot fix is blocked.
-func switchHint(kinds []string) string {
+func switchHint(checks []string) string {
 	var named []string
-	for _, k := range kinds {
+	for _, k := range checks {
 		if k != "" {
 			named = append(named, k)
 		}
 	}
-	if len(named) == 0 || len(named) < len(kinds) {
+	if len(named) == 0 || len(named) < len(checks) {
 		named = []string{"all"}
 	}
 	return " If this block is wrong, only the user can lift it: ask them to run `reright disable " + strings.Join(named, " ") + " --for 1h` in their own terminal (`reright enable " + strings.Join(named, " ") + "` turns it back on). Do not try to run it yourself."
@@ -266,9 +271,12 @@ func findRejection(raw json.RawMessage) (id, reason string, found bool) {
 	return r.ID, r.Reason, ok
 }
 
-func isWaitForReview(tool string) bool { return isRerightTool(tool, waitForReviewTool) }
+// isRewriteResult matches rewrite_result, the tool that waits on an id.
+func isRewriteResult(tool string) bool { return isRerightTool(tool, rewriteResultTool) }
 
-func isSubmitForReview(tool string) bool { return isRerightTool(tool, submitForReviewTool) }
+// isRewrite matches the rewrite tool, which submits and waits in one call, so its result can be
+// pending (track it), approved or rejected (lock).
+func isRewrite(tool string) bool { return isRerightTool(tool, rewriteTool) }
 
 func isRerightTool(tool, want string) bool {
 	rest, ok := strings.CutPrefix(strings.ToLower(tool), "mcp__")
@@ -279,7 +287,10 @@ func isRerightTool(tool, want string) bool {
 	return ok && name == want && (server == "reright" || (strings.HasPrefix(server, "plugin_") && strings.HasSuffix(server, "_reright")))
 }
 
-const waitForReviewTool = "wait_for_review"
+const (
+	rewriteTool       = "rewrite"
+	rewriteResultTool = "rewrite_result"
+)
 
 // lockPath names the lock file after a hash of the session id, so any id
 // length is safe. Without a session id the lock is per working directory, or

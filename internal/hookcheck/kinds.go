@@ -15,15 +15,13 @@ func (t Text) Kind() string {
 		return "gh"
 	case strings.HasPrefix(t.Source, "email"):
 		return "email"
-	case strings.HasPrefix(t.Source, "browser"):
-		return "browser"
 	}
 	return ""
 }
 
 // ProblemKinds lists the kinds a call that could not be read might have been sending.
 // A problem can be waived only when every entry is switched off; "" stands for something
-// no switch covers, so a call that might also run curl or an unknown tool stays blocked.
+// no switch covers.
 func ProblemKinds(tool string, input json.RawMessage) []string {
 	if tool == "Bash" {
 		var in struct {
@@ -34,12 +32,8 @@ func ProblemKinds(tool string, input json.RawMessage) []string {
 		}
 		return bashKinds(in.Command)
 	}
-	server := serverOf(tool)
-	switch {
-	case isGmailServer(server):
+	if isGmailServer(serverOf(tool)) {
 		return []string{"email"}
-	case isChromeServer(server):
-		return []string{"browser"}
 	}
 	return []string{""}
 }
@@ -52,12 +46,6 @@ func bashKinds(command string) []string {
 			seen["commit"] = true
 		case "gh":
 			seen["gh"] = true
-		case "curl", "wget":
-			seen["http"] = true
-		case "mail", "mailx", "sendmail", "mutt", "msmtp", "swaks", "smtplib":
-			seen["email"] = true
-		default:
-			seen[""] = true
 		}
 	}
 	if len(seen) == 0 {

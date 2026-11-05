@@ -23,15 +23,15 @@ var releasePublicKey string
 // version is set at release time with -X main.version. A local build reports "dev" and is never offered an update.
 var version = "dev"
 
-const usage = `usage: reright install --code CODE [--server URL] [--agent NAME]... [--all-supported] [--no-git] [--dry-run] [--yes] [--no-test] [--force]
+var usage = `usage: reright install --code CODE [--server URL] [--agent claude] [--all-supported] [--dry-run] [--yes] [--no-test] [--force]
        reright upgrade [--check] [--force]
-       reright doctor [--agent NAME]...
+       reright doctor [--agent claude]
        reright version
        reright uninstall [--agent NAME]... [--force]
 
 ` + switchUsage + `
 
-agents: claude, codex, gemini, copilot, cursor. Without --agent, install sets up every agent it finds.`
+reright sets up Claude Code only. uninstall --agent also takes codex, gemini, copilot or cursor, to remove what an earlier version wrote for them.`
 
 type agentList []string
 
@@ -187,9 +187,9 @@ func runInstall(ctx context.Context, args []string, home string, stdout, stderr 
 	hookPath := fs.String("hook-path", "", "where to install reright-hook (default ~/.local/bin/reright-hook)")
 	noTest := fs.Bool("no-test", false, "skip the test draft")
 	var agents agentList
-	fs.Var(&agents, "agent", "set up only this agent (repeatable): claude, codex, gemini, copilot, cursor")
-	allSupported := fs.Bool("all-supported", false, "write config for supported agents that were not detected")
-	noGit := fs.Bool("no-git", false, "skip the git layer")
+	fs.Var(&agents, "agent", "the agent to set up: claude, the only one supported")
+	allSupported := fs.Bool("all-supported", false, "write Claude Code's config even when Claude Code was not found")
+	noGit := fs.Bool("no-git", false, "ignored: reright no longer installs git hooks")
 	dryRun := fs.Bool("dry-run", false, "print the plan and change nothing")
 	yes := fs.Bool("yes", false, "accepted for scripts. install never asks a question")
 	force := fs.Bool("force", false, "edit read-only files and replace links into read-only folders")

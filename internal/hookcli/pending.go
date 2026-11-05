@@ -13,10 +13,7 @@ import (
 	"time"
 )
 
-const (
-	submitForReviewTool = "submit_for_review"
-	pendingCap          = 30 * time.Minute
-)
+const pendingCap = 30 * time.Minute
 
 type pendingDraft struct {
 	ID          string    `json:"id"`
@@ -156,13 +153,13 @@ func stopCheck(c call, decodeErr error, env Env) (block, note string) {
 func blockReason(live []pendingDraft) string {
 	if len(live) == 1 {
 		id := live[0].ID
-		return fmt.Sprintf("reright: still waiting for review (id %s). Don't end your turn: call wait_for_review(id %s) until approved/rejected.", id, id)
+		return fmt.Sprintf("reright: still waiting for review (id %s). Don't end your turn: call rewrite_result(id %s) until approved/rejected.", id, id)
 	}
 	ids := make([]string, len(live))
 	calls := make([]string, len(live))
 	for i, d := range live {
 		ids[i] = d.ID
-		calls[i] = "wait_for_review(id " + d.ID + ")"
+		calls[i] = "rewrite_result(id " + d.ID + ")"
 	}
 	return fmt.Sprintf("reright: still waiting for review (ids %s). Don't end your turn: call %s until approved/rejected.", strings.Join(ids, ", "), strings.Join(calls, ", "))
 }

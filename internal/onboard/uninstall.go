@@ -107,7 +107,7 @@ func Uninstall(ctx context.Context, o UninstallOptions) error {
 	if o.Out == nil {
 		o.Out = io.Discard
 	}
-	requested, err := normalizeAgents(o.Agents)
+	requested, err := normalizeAgents(o.Agents, true)
 	if err != nil {
 		return err
 	}
@@ -165,7 +165,7 @@ func Uninstall(ctx context.Context, o UninstallOptions) error {
 				rec.Files = append(rec.Files, FileRecord{Path: e.Path, Tags: e.tags(), Existed: true})
 			}
 		}
-		root := filepath.Join(o.Home, agentSpecs[agent].Dirs[0])
+		root := filepath.Join(o.Home, agentDir(agent))
 		for _, f := range rec.Files {
 			if err := restoreRecord(f, hadManifest, root, o.Out); err != nil {
 				if !o.Force {
@@ -186,16 +186,19 @@ func Uninstall(ctx context.Context, o UninstallOptions) error {
 				return err
 			}
 		}
-		fmt.Fprintf(o.Out, "Removed reright from %s. The hook binary, token and git layer stay for the other agents.\n", strings.Join(targets, ", "))
+		fmt.Fprintf(o.Out, "Removed reright from %s. The hook binary and token stay for the other agents.\n", strings.Join(targets, ", "))
 		return nil
 	}
-	notes, err := githook.UninstallNotes(o.Home)
+	present := githook.Present(o.Home)
+	notes, err := githook.Remove(o.Home)
 	if err != nil {
-		return fmt.Errorf("remove the git layer: %w", err)
+		return fmt.Errorf("remove the git hooks an earlier version installed: %w", err)
 	}
-	fmt.Fprintln(o.Out, "Removed the git layer (or it was not installed)")
+	if present || len(notes) > 0 {
+		fmt.Fprintln(o.Out, "Removed the git hooks an earlier version installed")
+	}
 	for _, n := range notes {
-		fmt.Fprintf(o.Out, "Git layer: %s\n", n)
+		fmt.Fprintf(o.Out, "Git hooks: %s\n", n)
 	}
 	files := []string{hook, p.TokenFile(), p.URLFile(), p.ManifestFile()}
 	for _, f := range files {
@@ -208,7 +211,8 @@ func Uninstall(ctx context.Context, o UninstallOptions) error {
 	} else if err := os.RemoveAll(p.BackupDir()); err != nil {
 		return err
 	}
-	if err := os.RemoveAll(filepath.Join(p.StateDir(), "locks")); err != nil {
+	// The hook's state: reject locks, pending drafts, the update notice and the server's upgrade policy.
+	if err := os.RemoveAll(p.StateDir()); err != nil {
 		return err
 	}
 	os.Remove(p.LockFile())

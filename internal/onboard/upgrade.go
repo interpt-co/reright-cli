@@ -9,9 +9,11 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
+	"github.com/interpt-co/reright-cli/internal/githook"
 	"github.com/interpt-co/reright-cli/internal/release"
 )
 
@@ -68,11 +70,21 @@ func (o *UpgradeOptions) defaults() {
 }
 
 // Upgrade replaces reright and reright-hook with the newest signed release. The device token and the agent
-// configuration are not touched, so no setup code is needed.
+// configuration are not touched, so no setup code is needed. It also removes the git hooks an earlier
+// version installed, even when the programs are already current.
 func Upgrade(ctx context.Context, o UpgradeOptions) error {
 	o.defaults()
 	if !release.Supported(o.GOOS, o.GOARCH) {
 		return fmt.Errorf("no reright build for %s/%s (Linux and macOS on amd64 and arm64 only)", o.GOOS, o.GOARCH)
+	}
+	if o.CheckOnly {
+		if githook.Present(o.Home) {
+			fmt.Fprintln(o.Out, "The git hooks an earlier reright installed are still there. reright upgrade removes them.")
+		}
+	} else {
+		for _, line := range removeGitLayer(o.Home) {
+			fmt.Fprintln(o.Out, "Git: "+line)
+		}
 	}
 	latest, table, err := Latest(ctx, o)
 	if err != nil {
@@ -204,7 +216,9 @@ const healEvery = 24 * time.Hour
 
 // HealClaudeHooks is run by reright-hook for Claude Code. An older reright upgrade replaces the binaries but
 // not the settings, so the new hook adds the entries it needs itself, at most once a day for each settings
-// file. RERIGHT_NO_SELF_HEAL=1 turns it off. It writes nothing to the terminal; the caller ignores errors.
+// file. It also removes the git hooks an earlier version installed. RERIGHT_NO_SELF_HEAL=1 turns it off.
+// It also brings the reright rule block in ~/.claude/CLAUDE.md up to date. It writes nothing to the terminal;
+// the caller ignores errors.
 func HealClaudeHooks(home, stateDir string, getenv func(string) string, now time.Time) error {
 	if getenv("RERIGHT_NO_SELF_HEAL") == "1" || home == "" || stateDir == "" {
 		return nil
@@ -225,5 +239,58 @@ func HealClaudeHooks(home, stateDir string, getenv func(string) string, now time
 	}
 	defer unlock()
 	_, err = healSettings(p, "")
+	if rerr := healRuleBlock(p); err == nil {
+		err = rerr
+	}
+	// The git hooks of 0.1 are not used any more. An upgrade run by a 0.1 reright does not know to remove
+	// them, so the new hook does it.
+	if githook.Present(home) {
+		if _, gerr := githook.Remove(home); err == nil {
+			err = gerr
+		}
+	}
 	return err
+}
+
+// ruleBlockSpan finds the reright block from its start marker to its end marker, and nothing around it.
+var ruleBlockSpan = regexp.MustCompile(`(?s)` + regexp.QuoteMeta(blockStart) + `.*?` + regexp.QuoteMeta(blockEnd))
+
+// healRuleBlock replaces the text between the reright markers in ~/.claude/CLAUDE.md with the current rule
+// block when it differs. Everything outside the markers stays byte for byte, and a file without both markers
+// is left alone. When the install record still matches the file, it is updated, so uninstall can still
+// restore the backup. The caller holds the config lock.
+func healRuleBlock(p Paths) error {
+	path := p.ClaudeMD()
+	dest, _ := resolveTarget(path)
+	cur, exists, err := readOptional(dest)
+	if err != nil || !exists {
+		return err
+	}
+	loc := ruleBlockSpan.FindIndex(cur)
+	if loc == nil {
+		return nil
+	}
+	want := strings.TrimRight(ruleBlock, "\n")
+	if string(cur[loc[0]:loc[1]]) == want {
+		return nil
+	}
+	next := append(append(append([]byte(nil), cur[:loc[0]]...), want...), cur[loc[1]:]...)
+	mode := os.FileMode(0o644)
+	if info, err := os.Stat(dest); err == nil {
+		mode = info.Mode().Perm()
+	}
+	if err := writeFile(dest, next, mode); err != nil {
+		return err
+	}
+	m, had, err := loadManifest(p)
+	if err != nil || !had {
+		return nil
+	}
+	if rec := m.Agents[agentClaude]; rec != nil {
+		if fr := rec.file(path); fr != nil && fr.AfterSHA == sha(cur) {
+			fr.AfterSHA = sha(next)
+			return saveManifest(p, m)
+		}
+	}
+	return nil
 }

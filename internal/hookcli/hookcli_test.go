@@ -75,7 +75,7 @@ func tool(session, name string) map[string]any {
 
 func waitResult(session, status string) map[string]any {
 	payload, _ := json.Marshal(map[string]string{"id": "abc", "status": status, "reason": "too long", "instruction": "..."})
-	return map[string]any{"session_id": session, "hook_event_name": "PostToolUse", "tool_name": "mcp__reright__wait_for_review",
+	return map[string]any{"session_id": session, "hook_event_name": "PostToolUse", "tool_name": "mcp__reright__rewrite_result",
 		"tool_response": map[string]any{"content": []any{map[string]any{"type": "text", "text": string(payload)}}}}
 }
 
@@ -91,16 +91,16 @@ func TestPreAllowsUnrelatedTool(t *testing.T) {
 
 func TestPreDeniesUnapprovedCommit(t *testing.T) {
 	f := newFixture(t)
-	d, reason := f.run(t, "pre", bash("s1", `git commit -m "Hi"`))
-	if d != "deny" || !strings.Contains(reason, "submit_for_review") {
+	d, reason := f.run(t, "pre", bash("s1", `git commit -m "Fix the login redirect"`))
+	if d != "deny" || !strings.Contains(reason, "rewrite") {
 		t.Fatalf("decision %q reason %q", d, reason)
 	}
 }
 
 func TestPreAllowsApprovedCommit(t *testing.T) {
 	f := newFixture(t)
-	f.checker.approved[draft.Hash("Hi")] = true
-	if d, r := f.run(t, "pre", bash("s1", `git commit -m "Hi"`)); d != "" {
+	f.checker.approved[draft.Hash("Fix the login redirect")] = true
+	if d, r := f.run(t, "pre", bash("s1", `git commit -m "Fix the login redirect"`)); d != "" {
 		t.Fatalf("decision %q reason %q", d, r)
 	}
 }
@@ -116,9 +116,36 @@ func TestPreAllowsApprovedHeredocCommit(t *testing.T) {
 
 func TestPreDeniesWhenOnePartUnapproved(t *testing.T) {
 	f := newFixture(t)
-	f.checker.approved[draft.Hash("New title")] = true
-	if d, _ := f.run(t, "pre", bash("s1", `gh pr edit 1 --title "New title" --body "Sneaky body"`)); d != "deny" {
+	f.checker.approved[draft.Hash("Fix the login redirect")] = true
+	if d, _ := f.run(t, "pre", bash("s1", `gh pr edit 1 --title "Fix the login redirect" --body "It also changes the settings page."`)); d != "deny" {
 		t.Fatalf("decision %q", d)
+	}
+}
+
+func TestPreLetsThroughTextThatIsNotFreeText(t *testing.T) {
+	f := newFixture(t)
+	for _, cmd := range []string{
+		`git tag -a v1.2.3 -m "v1.2.3"`,
+		`gh pr comment 12 --body "https://github.com/interpt-co/reright-cli/actions/runs/123"`,
+		`gh pr create --title "v0.2.0" --body "https://reright.it/changelog#v0.2.0"`,
+	} {
+		if d, reason := f.run(t, "pre", bash("s1", cmd)); d != "" {
+			t.Errorf("%s: decision %q reason %q", cmd, d, reason)
+		}
+	}
+	if f.checker.calls != 0 {
+		t.Fatalf("text that is not free text asked the server %d times", f.checker.calls)
+	}
+}
+
+func TestPreChecksARealCommitMessage(t *testing.T) {
+	f := newFixture(t)
+	cmd := "git commit -m \"$(cat <<'EOF'\nfix(hook): v1.2.3\n\nThe hook now lets versions and links through without asking the server.\nEOF\n)\""
+	if d, _ := f.run(t, "pre", bash("s1", cmd)); d != "deny" {
+		t.Fatal("a commit whose body is prose was let through unchecked")
+	}
+	if f.checker.calls != 1 {
+		t.Fatalf("server calls %d, want 1", f.checker.calls)
 	}
 }
 
@@ -133,12 +160,12 @@ func TestPreDeniesProblem(t *testing.T) {
 func TestPreServerDown(t *testing.T) {
 	f := newFixture(t)
 	f.checker.err = errors.New("connection refused")
-	d, reason := f.run(t, "pre", bash("s1", `git commit -m "Hi"`))
+	d, reason := f.run(t, "pre", bash("s1", `git commit -m "Fix the login redirect"`))
 	if d != "deny" || !strings.Contains(reason, "connection refused") {
 		t.Fatalf("decision %q reason %q", d, reason)
 	}
 	f.vars["RERIGHT_OFFLINE"] = "allow"
-	if d, _ := f.run(t, "pre", bash("s1", `git commit -m "Hi"`)); d != "" {
+	if d, _ := f.run(t, "pre", bash("s1", `git commit -m "Fix the login redirect"`)); d != "" {
 		t.Fatalf("offline allow ignored: %q", d)
 	}
 }
@@ -146,7 +173,7 @@ func TestPreServerDown(t *testing.T) {
 func TestBypass(t *testing.T) {
 	f := newFixture(t)
 	f.vars["RERIGHT_BYPASS"] = "1"
-	if d, _ := f.run(t, "pre", bash("s1", `git commit -m "Hi"`)); d != "" {
+	if d, _ := f.run(t, "pre", bash("s1", `git commit -m "Fix the login redirect"`)); d != "" {
 		t.Fatalf("bypass ignored: %q", d)
 	}
 }
@@ -183,7 +210,7 @@ func TestPostIgnoresApproved(t *testing.T) {
 
 func TestPostStructuredContent(t *testing.T) {
 	f := newFixture(t)
-	in := map[string]any{"session_id": "s1", "tool_name": "mcp__reright__wait_for_review",
+	in := map[string]any{"session_id": "s1", "tool_name": "mcp__reright__rewrite_result",
 		"tool_response": map[string]any{"structuredContent": map[string]any{"id": "x9", "status": "rejected"}}}
 	f.run(t, "post", in)
 	if d, reason := f.run(t, "pre", tool("s1", "Read")); d != "deny" || !strings.Contains(reason, "x9") {

@@ -88,7 +88,7 @@ func (m Manifest) validate(p Paths) error {
 	}
 	home := filepath.Clean(p.Home) + string(filepath.Separator)
 	for name, rec := range m.Agents {
-		if !validAgent(name) {
+		if !validAgent(name) && !isLegacyAgent(name) {
 			return fmt.Errorf("unknown agent %q", name)
 		}
 		if rec == nil {
@@ -126,9 +126,21 @@ func (a *AgentRecord) file(path string) *FileRecord {
 	return nil
 }
 
+// agentNames lists the agents in the record, Claude first, then any an earlier version set up.
 func (m Manifest) agentNames() []string {
 	var out []string
-	for _, n := range agentOrder {
+	for _, n := range append(append([]string(nil), agentOrder...), legacyOrder...) {
+		if _, ok := m.Agents[n]; ok {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+// legacyNames lists the agents in the record that this version no longer sets up.
+func (m Manifest) legacyNames() []string {
+	var out []string
+	for _, n := range legacyOrder {
 		if _, ok := m.Agents[n]; ok {
 			out = append(out, n)
 		}

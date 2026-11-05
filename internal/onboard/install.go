@@ -54,12 +54,15 @@ type Options struct {
 	SkipTest   bool
 	TestWait   time.Duration
 
-	Agents       []string
+	// Agents limits install to these agents. Only claude is accepted.
+	Agents []string
+	// AllSupported writes Claude's config even when Claude Code was not found.
 	AllSupported bool
-	NoGit        bool
-	DryRun       bool
-	Yes          bool
-	Force        bool
+	// NoGit is accepted for scripts written for earlier versions. There is no git layer to skip.
+	NoGit  bool
+	DryRun bool
+	Yes    bool
+	Force  bool
 }
 
 var ErrTestNotApproved = errors.New("the test draft was not approved")
@@ -111,7 +114,7 @@ type selection struct {
 func (s selection) selected() bool { return s.Skip == "" }
 
 func selectAgents(o Options, env planEnv) ([]selection, error) {
-	requested, err := normalizeAgents(o.Agents)
+	requested, err := normalizeAgents(o.Agents, false)
 	if err != nil {
 		return nil, err
 	}
@@ -175,7 +178,7 @@ func selectAgents(o Options, env planEnv) ([]selection, error) {
 		case len(requested) > 0:
 			return nil, fmt.Errorf("%s not found on this machine, so nothing can be set up. Install the agent first or pass --all-supported. Your setup code has not been used", strings.Join(notFound, ", "))
 		}
-		return nil, errors.New("no supported agent was found (looked for claude, codex, gemini, copilot and cursor). Install one first, or pass --agent NAME --all-supported to write config anyway. Your setup code has not been used")
+		return nil, errors.New("Claude Code was not found (no claude on PATH, no ~/.claude). reright sets up Claude Code only. Install it first, or pass --all-supported to write its config anyway. Your setup code has not been used")
 	}
 	return sels, nil
 }
@@ -190,11 +193,10 @@ func anySelected(sels []selection) bool {
 }
 
 type agentResult struct {
-	Agent      string
-	Done       []string
-	NotDone    []string
-	Unverified []string
-	Skip       string
+	Agent   string
+	Done    []string
+	NotDone []string
+	Skip    string
 }
 
 func (r agentResult) status() string {
@@ -207,7 +209,7 @@ func (r agentResult) status() string {
 	return "configured"
 }
 
-func printSummary(out io.Writer, results []agentResult, git string, manual []string) {
+func printSummary(out io.Writer, results []agentResult, git []string) {
 	fmt.Fprintln(out, "\nSummary")
 	for _, r := range results {
 		fmt.Fprintf(out, "  %-8s %s\n", r.Agent, r.status())
@@ -217,16 +219,13 @@ func printSummary(out io.Writer, results []agentResult, git string, manual []str
 		for _, d := range r.NotDone {
 			fmt.Fprintf(out, "           not done: %s\n", d)
 		}
-		for _, d := range r.Unverified {
-			fmt.Fprintf(out, "           unverified: %s\n", d)
+	}
+	for i, g := range git {
+		label := ""
+		if i == 0 {
+			label = "git"
 		}
-	}
-	if git != "" {
-		fmt.Fprintf(out, "  %-8s %s\n", "git", git)
-	}
-	if len(manual) > 0 {
-		fmt.Fprint(out, "\nRule text to paste by hand:\n\n")
-		fmt.Fprintln(out, strings.TrimSpace(ruleBlock))
+		fmt.Fprintf(out, "  %-8s %s\n", label, g)
 	}
 }
 
@@ -251,8 +250,6 @@ func resultFor(s selection) agentResult {
 		return r
 	}
 	r.NotDone = append(r.NotDone, s.Plan.Partial...)
-	r.NotDone = append(r.NotDone, s.Plan.Manual...)
-	r.Unverified = agentSpecs[s.Agent].Unverified
 	return r
 }
 
@@ -329,11 +326,11 @@ func Install(ctx context.Context, o Options) error {
 		return err
 	}
 
-	results, manual, gitLine, err := applyInstall(ctx, o, p, ex, hook, sels)
+	results, gitLines, err := applyInstall(ctx, o, p, ex, hook, sels)
 	if err != nil {
 		return err
 	}
-	printSummary(o.Out, results, gitLine, manual)
+	printSummary(o.Out, results, gitLines)
 
 	var skipped []string
 	for _, s := range sels {
@@ -352,7 +349,7 @@ func Install(ctx context.Context, o Options) error {
 		fmt.Fprintln(o.Out, "\nSkipped the test draft. Run reright doctor to check the setup.")
 		return finish()
 	}
-	step(o.Out, 6, "Submitting a test draft. Approve it in your browser")
+	step(o.Out, 6, "Sending a test draft. If reright asks, approve it in your browser")
 	res, err := submitTestDraft(ctx, ex.Server, ex.Token, o.TestWait, func(u string) {
 		fmt.Fprintf(o.Out, "Review link: %s\n", u)
 	})
@@ -366,37 +363,36 @@ func Install(ctx context.Context, o Options) error {
 	return finish()
 }
 
-func applyInstall(ctx context.Context, o Options, p Paths, ex exchanged, hook []byte, sels []selection) ([]agentResult, []string, string, error) {
+func applyInstall(ctx context.Context, o Options, p Paths, ex exchanged, hook []byte, sels []selection) ([]agentResult, []string, error) {
 	unlock, err := lockConfig(p)
 	if err != nil {
-		return nil, nil, "", fmt.Errorf("%w (the setup code is spent; generate a new one)", err)
+		return nil, nil, fmt.Errorf("%w (the setup code is spent; generate a new one)", err)
 	}
 	defer unlock()
 
 	m, _, err := loadManifest(p)
 	if err != nil {
-		return nil, nil, "", fmt.Errorf("%s changed while install ran: %w (the setup code is spent; generate a new one)", p.ManifestFile(), err)
+		return nil, nil, fmt.Errorf("%s changed while install ran: %w (the setup code is spent; generate a new one)", p.ManifestFile(), err)
 	}
 	m.Server, m.HookPath = ex.Server, o.HookPath
 
 	step(o.Out, 3, "Installing the hook binary at %s", o.HookPath)
 	if err := writeFile(o.HookPath, hook, 0o755); err != nil {
-		return nil, nil, "", fmt.Errorf("install hook: %w (the setup code is spent; generate a new one)", err)
+		return nil, nil, fmt.Errorf("install hook: %w (the setup code is spent; generate a new one)", err)
 	}
 	if err := writePrivate(p.TokenFile(), []byte(ex.Token+"\n")); err != nil {
-		return nil, nil, "", err
+		return nil, nil, err
 	}
 	if err := writePrivate(p.URLFile(), []byte(ex.Server+"\n")); err != nil {
-		return nil, nil, "", err
+		return nil, nil, err
 	}
 	if err := saveManifest(p, m); err != nil {
-		return nil, nil, "", err
+		return nil, nil, err
 	}
 
 	step(o.Out, 4, "Configuring agents (user-level files only)")
 	env := planEnv{Home: o.Home, HookPath: o.HookPath, Server: ex.Server, Token: ex.Token}
 	var results []agentResult
-	var manual []string
 	for _, s := range sels {
 		r := resultFor(s)
 		if !s.selected() {
@@ -405,9 +401,9 @@ func applyInstall(ctx context.Context, o Options, p Paths, ex exchanged, hook []
 		}
 		plan, err := buildPlan(s.Agent, env)
 		if err != nil {
-			return nil, nil, "", err
+			return nil, nil, err
 		}
-		plan.Partial, plan.Manual = s.Plan.Partial, s.Plan.Manual
+		plan.Partial = s.Plan.Partial
 		var kept []fileEdit
 		for _, e := range plan.Edits {
 			if containsPath(s.Plan.Edits, e.Path) {
@@ -418,34 +414,25 @@ func applyInstall(ctx context.Context, o Options, p Paths, ex exchanged, hook []
 		rec := m.record(s.Agent)
 		for _, e := range plan.Edits {
 			if err := writeEdit(p, s.Agent, &m, rec, e, o.Force); err != nil {
-				return nil, nil, "", fmt.Errorf("%s: %w. Run reright uninstall to undo the steps that worked", s.Agent, err)
+				return nil, nil, fmt.Errorf("%s: %w. Run reright uninstall to undo the steps that worked", s.Agent, err)
 			}
 			r.Done = append(r.Done, describeEdit(e))
 		}
-		if len(plan.Manual) > 0 {
-			rec.Manual = plan.Manual
-			manual = append(manual, plan.Manual...)
-		}
 		if plan.ClaudeMCP {
 			if err := registerClaude(ctx, o, ex, rec, &m, p, &r); err != nil {
-				return nil, nil, "", err
+				return nil, nil, err
 			}
 		}
 		results = append(results, r)
 	}
 
-	gitLine := ""
-	if o.NoGit {
-		m.Git = "skipped"
-		gitLine = "skipped (--no-git). Commits are not checked outside agent hooks"
-	} else {
-		step(o.Out, 5, "Installing the git layer")
-		gitLine, m.Git = installGit(o)
-	}
+	step(o.Out, 5, "Checking for git hooks from an earlier version")
+	gitLines := removeGitLayer(o.Home)
+	m.Git = ""
 	if err := saveManifest(p, m); err != nil {
-		return nil, nil, "", err
+		return nil, nil, err
 	}
-	return results, manual, gitLine, nil
+	return results, gitLines, nil
 }
 
 func containsPath(edits []fileEdit, path string) bool {
@@ -497,24 +484,24 @@ func registerClaude(ctx context.Context, o Options, ex exchanged, rec *AgentReco
 	return nil
 }
 
-func installGit(o Options) (string, string) {
-	res, err := githook.Install(o.Home, o.HookPath)
-	switch {
-	case err != nil:
-		return "not installed: " + err.Error(), "failed"
-	case res.Manual != "":
-		return "not activated. " + strings.TrimSpace(res.Manual), "manual"
-	case res.Activated:
-		return "installed in " + res.HooksDir + " and set as the global core.hooksPath. Agents that run git commit are checked. Your other git hooks still run through the wrappers. Commits with no terminal (IDEs, git GUIs) count as agent commits when the server answers and pass when it does not; set \"tty_heuristic\": false in ~/.config/reright/git.json to stop checking them. Repos with their own core.hooksPath (husky) bypass the layer", "installed"
+// removeGitLayer takes away the git hooks reright 0.1 installed, if they are there, and says what it did.
+// It never fails: a layer that cannot be removed is reported, and doctor keeps warning about it.
+func removeGitLayer(home string) []string {
+	present := githook.Present(home)
+	notes, err := githook.Remove(home)
+	if !present && len(notes) == 0 && err == nil {
+		return nil
 	}
-	return "wrappers written to " + res.HooksDir + " but core.hooksPath does not point at them", "manual"
+	if err != nil {
+		return append(notes, "the git hooks of an earlier version could not be removed: "+err.Error()+". Run reright upgrade again, or remove ~/.config/reright/git-hooks and unset core.hooksPath by hand")
+	}
+	return append([]string{"removed the git hooks of an earlier version. Commit messages are checked by the Claude Code hook"}, notes...)
 }
 
 func dryRun(o Options, sels []selection) error {
 	fmt.Fprintln(o.Out, "Dry run. Nothing was downloaded, written or changed.")
 	fmt.Fprintf(o.Out, "Would install the hook binary at %s and keep the device token in %s (mode 600).\n", o.HookPath, Paths{o.Home}.TokenFile())
 	var results []agentResult
-	var manual []string
 	for _, s := range sels {
 		r := resultFor(s)
 		if s.selected() {
@@ -524,20 +511,14 @@ func dryRun(o Options, sels []selection) error {
 			if s.Plan.ClaudeMCP {
 				r.Done = append(r.Done, "would run: claude mcp add --scope user --transport http reright "+mcpURL(o.Server)+" --header \"Authorization: Bearer <token>\"")
 			}
-			manual = append(manual, s.Plan.Manual...)
 		}
 		results = append(results, r)
 	}
-	gitLine := "skipped (--no-git)"
-	if !o.NoGit {
-		gitLine = "would write wrappers for the git hooks to ~/.config/reright/git-hooks (commit-msg and prepare-commit-msg check the message, the others only hand over to the repository's own hook)"
-		if info, err := githook.Status(o.Home); err == nil && info.GlobalHooksPath != "" && !info.Active {
-			gitLine += ". core.hooksPath is already " + info.GlobalHooksPath + ", so it would not be changed and you would add two lines by hand"
-		} else {
-			gitLine += " and set the global core.hooksPath"
-		}
+	var git []string
+	if githook.Present(o.Home) {
+		git = []string{"would remove the git hooks an earlier version installed in ~/.config/reright/git-hooks and put core.hooksPath back"}
 	}
-	printSummary(o.Out, results, gitLine, manual)
+	printSummary(o.Out, results, git)
 	return nil
 }
 

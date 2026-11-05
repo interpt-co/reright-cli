@@ -1,5 +1,5 @@
-// Package toggle holds the user's choice to switch reright's checks off for
-// some kinds of text, for a while or in one directory. The state is one JSON
+// Package toggle holds the user's choice to switch some of reright's checks
+// off, for a while or in one directory. The state is one JSON
 // file that only the reright command writes. The hook reads it on every call,
 // so a change takes effect in the running session with no restart.
 package toggle
@@ -16,19 +16,17 @@ import (
 	"time"
 )
 
-// Kinds are the groups of text the user can switch off. "all" in a command means every one of them.
-var Kinds = []string{"commit", "gh", "email", "browser", "http"}
+// Checks are the groups of text the user can switch off. "all" in a command means every one of them.
+var Checks = []string{"commit", "gh", "email"}
 
-// Descriptions say what each kind covers, for status output and help.
+// Descriptions say what each check covers, for status output and help.
 var Descriptions = map[string]string{
-	"commit":  "git commit messages (agent hooks and the git layer)",
-	"gh":      "gh pr, issue, release and api text",
-	"email":   "Gmail send, draft, reply and forward",
-	"browser": "text typed or inserted in the browser",
-	"http":    "curl and wget requests that send a body to a remote host",
+	"commit": "git commit and tag messages",
+	"gh":     "gh pr, issue, release and api text",
+	"email":  "Gmail send, draft, reply and forward",
 }
 
-// Rule switches one kind off. Until is zero for "until I turn it back on".
+// Rule switches one check off. Until is zero for "until I turn it back on".
 // Dirs is empty for everywhere, otherwise only calls whose working directory is inside one of them.
 type Rule struct {
 	Until time.Time `json:"until,omitempty"`
@@ -43,9 +41,9 @@ type File struct {
 // Path is where the state lives inside the reright config directory.
 func Path(cfgDir string) string { return filepath.Join(cfgDir, "enforcement.json") }
 
-// Valid reports whether name is a kind.
+// Valid reports whether name is a check.
 func Valid(name string) bool {
-	for _, k := range Kinds {
+	for _, k := range Checks {
 		if k == name {
 			return true
 		}
@@ -53,7 +51,7 @@ func Valid(name string) bool {
 	return false
 }
 
-// Expand turns the names a user typed into kinds. "all" means every kind.
+// Expand turns the names a user typed into checks. "all" means every check.
 func Expand(names []string) ([]string, error) {
 	seen := map[string]bool{}
 	var out []string
@@ -61,7 +59,7 @@ func Expand(names []string) ([]string, error) {
 		n = strings.ToLower(strings.TrimSpace(n))
 		switch {
 		case n == "all":
-			for _, k := range Kinds {
+			for _, k := range Checks {
 				if !seen[k] {
 					seen[k] = true
 					out = append(out, k)
@@ -73,17 +71,18 @@ func Expand(names []string) ([]string, error) {
 				out = append(out, n)
 			}
 		default:
-			return nil, fmt.Errorf("unknown kind %q (want %s or all)", n, strings.Join(Kinds, ", "))
+			return nil, fmt.Errorf("unknown check %q (want %s or all)", n, strings.Join(Checks, ", "))
 		}
 	}
 	if len(out) == 0 {
-		return nil, fmt.Errorf("name at least one kind (%s or all)", strings.Join(Kinds, ", "))
+		return nil, fmt.Errorf("name at least one check (%s or all)", strings.Join(Checks, ", "))
 	}
 	return out, nil
 }
 
 // Load reads the state. A missing file is an empty state. A damaged file is an
-// error, and callers must then keep enforcing.
+// error, and callers must then keep enforcing. Entries for checks this version does not
+// have (browser and http in older versions) are dropped.
 func Load(cfgDir string) (File, error) {
 	b, err := os.ReadFile(Path(cfgDir))
 	if errors.Is(err, fs.ErrNotExist) {
@@ -95,6 +94,11 @@ func Load(cfgDir string) (File, error) {
 	var f File
 	if err := json.Unmarshal(b, &f); err != nil {
 		return File{}, fmt.Errorf("%s is not valid JSON: %w", Path(cfgDir), err)
+	}
+	for k := range f.Disabled {
+		if !Valid(k) {
+			delete(f.Disabled, k)
+		}
 	}
 	return f, nil
 }
@@ -133,9 +137,9 @@ func save(cfgDir string, f File) error {
 	return os.Rename(tmp.Name(), Path(cfgDir))
 }
 
-// Off reports whether checks for kind are switched off for a call made in cwd at now.
-func (f File) Off(kind, cwd string, now time.Time) bool {
-	r, ok := f.Disabled[kind]
+// Off reports whether check is switched off for a call made in cwd at now.
+func (f File) Off(check, cwd string, now time.Time) bool {
+	r, ok := f.Disabled[check]
 	if !ok {
 		return false
 	}
@@ -165,8 +169,8 @@ func inside(dir, cwd string) bool {
 	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
-// Disable switches kinds off. Dirs must be absolute. A kind that is already off is replaced.
-func Disable(cfgDir string, kinds []string, until time.Time, dirs []string) error {
+// Disable switches checks off. Dirs must be absolute. A check that is already off is replaced.
+func Disable(cfgDir string, checks []string, until time.Time, dirs []string) error {
 	for _, d := range dirs {
 		if !filepath.IsAbs(d) {
 			return fmt.Errorf("directory %q is not absolute", d)
@@ -180,19 +184,19 @@ func Disable(cfgDir string, kinds []string, until time.Time, dirs []string) erro
 	if f.Disabled == nil {
 		f.Disabled = map[string]Rule{}
 	}
-	for _, k := range kinds {
+	for _, k := range checks {
 		f.Disabled[k] = Rule{Until: until, Dirs: dirs}
 	}
 	return save(cfgDir, f)
 }
 
-// Enable switches kinds back on. It also clears expired rules.
-func Enable(cfgDir string, kinds []string, now time.Time) error {
+// Enable switches checks back on. It also clears expired rules.
+func Enable(cfgDir string, checks []string, now time.Time) error {
 	f, err := Load(cfgDir)
 	if err != nil {
 		f = File{}
 	}
-	for _, k := range kinds {
+	for _, k := range checks {
 		delete(f.Disabled, k)
 	}
 	for k, r := range f.Disabled {
@@ -203,10 +207,10 @@ func Enable(cfgDir string, kinds []string, now time.Time) error {
 	return save(cfgDir, f)
 }
 
-// Lines describes the state, one line per kind, for `reright status`.
+// Lines describes the state, one line per check, for `reright status`.
 func (f File) Lines(now time.Time) []string {
 	var out []string
-	for _, k := range Kinds {
+	for _, k := range Checks {
 		line := fmt.Sprintf("%-8s on   %s", k, Descriptions[k])
 		if r, ok := f.Disabled[k]; ok && (r.Until.IsZero() || now.Before(r.Until)) {
 			line = fmt.Sprintf("%-8s OFF  %s", k, scope(r, now))

@@ -31,7 +31,7 @@ func TestSwitchedOffCommitsPassWithoutAServerCall(t *testing.T) {
 		t.Fatalf("decision %q (%s)", d, reason)
 	}
 	if f.checker.calls != 0 {
-		t.Fatal("a switched-off kind still asked the server")
+		t.Fatal("a switched-off check still asked the server")
 	}
 }
 
@@ -39,10 +39,10 @@ func TestSwitchingOffCommitsLeavesOtherKindsChecked(t *testing.T) {
 	f := newFixture(t)
 	dir := withSwitches(t, f)
 	toggle.Disable(dir, []string{"commit"}, time.Time{}, nil)
-	if d, _ := f.run(t, "pre", bash("s1", `gh pr comment 1 --body "hello there"`)); d != "deny" {
+	if d, _ := f.run(t, "pre", bash("s1", `gh pr comment 1 --body "thanks, I will look at this today"`)); d != "deny" {
 		t.Fatal("gh was not checked while only commit was off")
 	}
-	if d, _ := f.run(t, "pre", bash("s1", `git commit -m "x" && gh pr comment 1 --body "hello there"`)); d != "deny" {
+	if d, _ := f.run(t, "pre", bash("s1", `git commit -m "Fix the login redirect" && gh pr comment 1 --body "thanks, I will look at this today"`)); d != "deny" {
 		t.Fatal("a command with a commit and a gh comment slipped through")
 	}
 }
@@ -57,8 +57,8 @@ func TestSwitchedOffUnreadableCommitIsWaived(t *testing.T) {
 	if d, reason := f.run(t, "pre", bash("s1", `git commit -m "$MSG"`)); d != "" {
 		t.Fatalf("off: decision %q (%s)", d, reason)
 	}
-	if d, _ := f.run(t, "pre", bash("s1", `git commit -m "$MSG" && curl -d "$MSG" https://example.com/x`)); d != "deny" {
-		t.Fatal("a problem that might also be curl was waived")
+	if d, _ := f.run(t, "pre", bash("s1", `git commit -m "$MSG" && gh pr comment 1 --body "$MSG"`)); d != "deny" {
+		t.Fatal("a problem that might also be gh text was waived")
 	}
 }
 
@@ -68,7 +68,7 @@ func TestSwitchesRespectDirectoryAndExpiry(t *testing.T) {
 	now := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
 	f.env.Now = func() time.Time { return now }
 	toggle.Disable(dir, []string{"commit"}, now.Add(time.Hour), []string{"/work/internal"})
-	cmd := `git commit -m "wip"`
+	cmd := `git commit -m "Fix the login redirect"`
 	if d, _ := f.run(t, "pre", inDir(bash("s1", cmd), "/work/internal/app")); d != "" {
 		t.Fatalf("inside the directory: %q", d)
 	}
@@ -95,7 +95,7 @@ func TestDamagedSwitchFileKeepsChecking(t *testing.T) {
 	f := newFixture(t)
 	dir := withSwitches(t, f)
 	os.WriteFile(toggle.Path(dir), []byte("{nope"), 0o600)
-	if d, _ := f.run(t, "pre", bash("s1", `git commit -m "x"`)); d != "deny" {
+	if d, _ := f.run(t, "pre", bash("s1", `git commit -m "Fix the login redirect"`)); d != "deny" {
 		t.Fatal("a damaged switch file turned checking off")
 	}
 }
@@ -128,7 +128,7 @@ func TestAgentCannotChangeTheSwitches(t *testing.T) {
 func TestGuardHoldsEvenWhenEverythingIsOff(t *testing.T) {
 	f := newFixture(t)
 	dir := withSwitches(t, f)
-	toggle.Disable(dir, []string{"commit", "gh", "email", "browser"}, time.Time{}, nil)
+	toggle.Disable(dir, toggle.Checks, time.Time{}, nil)
 	if d, _ := f.run(t, "pre", bash("s1", `reright enable commit`)); d != "deny" {
 		t.Fatal("an agent changed the switches while checks were off")
 	}
@@ -141,7 +141,7 @@ func TestDisableAllLiftsBlocksNoSingleKindDescribes(t *testing.T) {
 	if d == "deny" && !strings.Contains(reason, "reright disable all") {
 		t.Fatalf("hint for an unclassified block: %s", reason)
 	}
-	toggle.Disable(dir, toggle.Kinds, time.Time{}, nil)
+	toggle.Disable(dir, toggle.Checks, time.Time{}, nil)
 	if d, reason := f.run(t, "pre", bash("s1", `$CMD "$ARG" && git log`)); d != "" {
 		t.Fatalf("all off, still blocked: %s", reason)
 	}

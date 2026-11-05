@@ -9,7 +9,7 @@ import (
 	"mvdan.cc/sh/v3/syntax"
 )
 
-var mentionsGitOrGh = regexp.MustCompile(`(^|[\s;&|(/])(git|gh|curl|wget|mail|mailx|sendmail|mutt|msmtp|swaks)\s`)
+var mentionsGitOrGh = regexp.MustCompile(`(^|[\s;&|(/])(git|gh)\s`)
 
 const plainArgs = "Pass the approved text as a plain quoted argument (-m '...', --body '...'), a quoted heredoc (\"$(cat <<'EOF' ... EOF)\") or a file."
 
@@ -19,9 +19,6 @@ type shell struct {
 	// compound is true when the line runs more than one command or redirects
 	// output. A message file may then be written after the hook reads it.
 	compound bool
-	raw      string
-	depth    int
-	hint     bool
 }
 
 // readFile returns the contents of a message file, or a problem when the hook
@@ -43,10 +40,10 @@ func (sh shell) readFile(what, name string) (string, *Result) {
 	return body, nil
 }
 
-// Bash inspects a shell command for git commits and gh calls that carry text.
-func Bash(command, cwd string) Result { return bashAt(command, cwd, 0) }
-
-func bashAt(command, cwd string, depth int) Result {
+// Bash inspects a shell command for git commits and tags and gh calls that carry text.
+// Text that only reaches git or gh through another program (a script, eval, bash -c,
+// xargs) is not looked for.
+func Bash(command, cwd string) Result {
 	file, err := syntax.NewParser().Parse(strings.NewReader(command), "")
 	if err != nil {
 		if mentionsGitOrGh.MatchString(command) {
@@ -54,38 +51,11 @@ func bashAt(command, cwd string, depth int) Result {
 		}
 		return Result{}
 	}
-	sh := shell{cwd: cwd, compound: true, raw: command, depth: depth}
+	sh := shell{cwd: cwd, compound: true}
 	if len(file.Stmts) == 1 && len(file.Stmts[0].Redirs) == 0 {
 		_, single := file.Stmts[0].Cmd.(*syntax.CallExpr)
 		sh.compound = !single
 	}
-	syntax.Walk(file, func(n syntax.Node) bool {
-		switch n := n.(type) {
-		case *syntax.Assign:
-			if n.Value != nil && sensitiveWord.MatchString(nodeText(command, n.Value)) {
-				sh.hint = true
-			}
-		case *syntax.ForClause:
-			if wi, ok := n.Loop.(*syntax.WordIter); ok {
-				for _, w := range wi.Items {
-					if sensitiveWord.MatchString(nodeText(command, w)) {
-						sh.hint = true
-					}
-				}
-			}
-		}
-		return true
-	})
-	// A call that reads a heredoc is judged on its own text plus the heredoc body, never on the rest of the script.
-	withInput := map[*syntax.CallExpr]string{}
-	syntax.Walk(file, func(n syntax.Node) bool {
-		if st, ok := n.(*syntax.Stmt); ok {
-			if call, ok := st.Cmd.(*syntax.CallExpr); ok && len(st.Redirs) > 0 {
-				withInput[call] = nodeText(command, st)
-			}
-		}
-		return true
-	})
 	var res Result
 	syntax.Walk(file, func(n syntax.Node) bool {
 		call, ok := n.(*syntax.CallExpr)
@@ -97,11 +67,7 @@ func bashAt(command, cwd string, depth int) Result {
 			args[i].s, args[i].ok = wordValue(w)
 			args[i].prefix = literalPrefix(w)
 		}
-		text := nodeText(command, call)
-		if t, ok := withInput[call]; ok {
-			text = t
-		}
-		res.merge(sh.dispatch(args, text))
+		res.merge(sh.dispatch(args))
 		return true
 	})
 	return res
@@ -297,12 +263,7 @@ func gitCall(args []arg, sh shell) Result {
 			continue
 		case a.s == "-c" && i+1 < len(args):
 			i++
-			if !args[i].ok || isAliasConfig(args[i].s) {
-				return problem("git -c defines or reads an alias, which can run a commit the hook cannot read. Run git commit directly with the approved text.")
-			}
 			continue
-		case strings.HasPrefix(a.s, "-c") && isAliasConfig(a.s[2:]), strings.HasPrefix(a.s, "--config-env=") && isAliasConfig(strings.TrimPrefix(a.s, "--config-env=")):
-			return problem("git -c defines or reads an alias, which can run a commit the hook cannot read. Run git commit directly with the approved text.")
 		case strings.HasPrefix(a.s, "-"):
 			continue
 		}
@@ -323,10 +284,6 @@ func gitCall(args []arg, sh shell) Result {
 		return gitMessage(args[i].s, args[i+1:], sh)
 	}
 	return Result{}
-}
-
-func isAliasConfig(s string) bool {
-	return strings.HasPrefix(strings.ToLower(s), "alias.")
 }
 
 var commitTextOptions = []string{"--message", "--file", "--template", "--reuse-message", "--reedit-message", "--fixup", "--squash"}
@@ -731,10 +688,6 @@ func ghAPI(args []arg, sh shell) Result {
 			continue
 		}
 		key, val, _ := strings.Cut(field, "=")
-		if key == "query" && strings.Contains(val, "mutation") {
-			r.fail("gh api graphql mutations can carry text the hook cannot pick out. Use the REST form (gh pr comment, gh api -f body='...') for anything a person will read.")
-			continue
-		}
 		if !apiTextKey(key) {
 			continue
 		}

@@ -216,7 +216,7 @@ type testResult struct {
 	URL    string
 }
 
-const testDraftText = "Test message from reright setup\n\nThis draft checks that your setup works. Approve it in the browser to finish."
+const testDraftText = "Hello from reright, the setup works."
 
 func submitTestDraft(ctx context.Context, server, tok string, wait time.Duration, announce func(reviewURL string)) (testResult, error) {
 	cs, err := mcpSession(ctx, server, tok)
@@ -226,19 +226,28 @@ func submitTestDraft(ctx context.Context, server, tok string, wait time.Duration
 	defer cs.Close()
 	var sub struct {
 		ID        string `json:"id"`
+		Status    string `json:"status"`
+		Reason    string `json:"reason"`
 		ReviewURL string `json:"review_url"`
 	}
-	err = callTool(ctx, cs, "submit_for_review", map[string]string{
-		"kind":    "other",
+	err = callTool(ctx, cs, "rewrite", map[string]string{
+		"kind":    "message",
 		"text":    testDraftText,
-		"context": "This is the test draft that reright setup submits. Approving it confirms that the hooks and the MCP server work on this machine.",
+		"context": "This is the test draft that reright setup sends. It confirms that the hooks and the MCP server work on this machine.",
 		"target":  "reright setup",
 		"origin":  "reright install",
+		"agent":   "reright install",
+		"run":     "setup test",
 	}, &sub)
 	if err != nil {
-		return testResult{}, fmt.Errorf("submit test draft: %w", err)
+		return testResult{}, fmt.Errorf("send test draft: %w", err)
 	}
-	announce(sub.ReviewURL)
+	if sub.Status != "pending" {
+		return testResult{Status: sub.Status, Reason: sub.Reason, URL: sub.ReviewURL}, nil
+	}
+	if sub.ReviewURL != "" {
+		announce(sub.ReviewURL)
+	}
 	deadline := time.Now().Add(wait)
 	for {
 		left := time.Until(deadline)
@@ -250,7 +259,7 @@ func submitTestDraft(ctx context.Context, server, tok string, wait time.Duration
 			Status string `json:"status"`
 			Reason string `json:"reason"`
 		}
-		if err := callTool(ctx, cs, "wait_for_review", map[string]any{"id": sub.ID, "max_wait_seconds": secs}, &w); err != nil {
+		if err := callTool(ctx, cs, "rewrite_result", map[string]any{"id": sub.ID, "max_wait_seconds": secs}, &w); err != nil {
 			return testResult{}, fmt.Errorf("wait for the test draft: %w", err)
 		}
 		if w.Status != "pending" {

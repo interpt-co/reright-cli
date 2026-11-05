@@ -100,7 +100,7 @@ func TestDisableFlagsAndErrors(t *testing.T) {
 		}
 	}
 	if code, out, errs := exec(t, home, "disable", "--dir", "/work/internal", "all", "--for=30m"); code != 0 {
-		t.Fatalf("flags before and after the kind: %d %q %q", code, out, errs)
+		t.Fatalf("flags before and after the check: %d %q %q", code, out, errs)
 	}
 	if _, out, _ := exec(t, home, "status"); !strings.Contains(out, "only in /work/internal") || strings.Contains(out, "email    on") {
 		t.Fatalf("scope missing:\n%s", out)

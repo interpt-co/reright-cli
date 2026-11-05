@@ -32,9 +32,6 @@ func TestForEveryAgent(t *testing.T) {
 			if !strings.Contains(s.Content, "/home/u/.local/bin/reright-hook") {
 				t.Errorf("%s %s: binary path missing", agent, s.Path)
 			}
-			if agent != Claude && !strings.Contains(s.Content, "--agent "+agent) {
-				t.Errorf("%s %s: no --agent flag", agent, s.Path)
-			}
 		}
 	}
 }
@@ -54,62 +51,17 @@ func TestAgentNamesMatchHookcli(t *testing.T) {
 	}
 }
 
-func TestCursorFailsClosed(t *testing.T) {
-	snips, _ := For(Cursor, "reright-hook")
-	var cfg struct {
-		Version int `json:"version"`
-		Hooks   map[string][]struct {
-			Command    string `json:"command"`
-			FailClosed bool   `json:"failClosed"`
-		} `json:"hooks"`
-	}
-	if err := json.Unmarshal([]byte(snips[0].Content), &cfg); err != nil {
-		t.Fatal(err)
-	}
-	if cfg.Version != 1 {
-		t.Fatalf("version %d", cfg.Version)
-	}
-	for _, ev := range []string{"beforeShellExecution", "beforeMCPExecution"} {
-		h := cfg.Hooks[ev]
-		if len(h) != 1 || !h[0].FailClosed || h[0].Command != "reright-hook pre --agent cursor" {
-			t.Errorf("%s: %+v", ev, h)
-		}
-	}
-	if snips[0].Path != ".cursor/hooks.json" {
-		t.Fatal(snips[0].Path)
-	}
-}
-
-func TestCodexAndGeminiShape(t *testing.T) {
-	c, _ := For(Codex, "reright-hook")
-	if c[0].Path != ".codex/hooks.json" || !strings.Contains(c[0].Content, `"PreToolUse"`) || !strings.Contains(c[0].Content, "mcp__reright__wait_for_review") {
-		t.Fatalf("codex: %+v", c[0])
-	}
-	g, _ := For(Gemini, "reright-hook")
-	if g[0].Path != ".gemini/settings.json" || !strings.Contains(g[0].Content, `"BeforeTool"`) || !strings.Contains(g[0].Content, `"AfterTool"`) || !strings.Contains(g[0].Content, `"BeforeAgent"`) {
-		t.Fatalf("gemini: %+v", g[0])
-	}
-	if !g[0].Merge {
-		t.Fatal("gemini settings.json must be merged, not replaced")
-	}
-}
-
-func TestCopilotOwnsItsFiles(t *testing.T) {
-	c, _ := For(Copilot, "reright-hook")
-	if len(c) != 1 || c[0].Merge || !strings.Contains(c[0].Content, `"version": 1`) || !strings.Contains(c[0].Content, `"timeoutSec": 30`) {
-		t.Fatalf("copilot: %+v", c)
-	}
-}
-
 func TestQuotingAndErrors(t *testing.T) {
-	s, err := For(Codex, "/home/my user/bin/reright-hook")
-	if err != nil || !strings.Contains(s[0].Content, `'/home/my user/bin/reright-hook' pre --agent codex`) {
+	s, err := For(Claude, "/home/my user/bin/reright-hook")
+	if err != nil || !strings.Contains(s[0].Content, `'/home/my user/bin/reright-hook' pre`) {
 		t.Fatalf("%v %v", err, s)
 	}
-	if _, err := For("nope", "x"); err == nil {
-		t.Fatal("unknown agent accepted")
+	for _, agent := range []string{"nope", "codex", "gemini", "copilot", "cursor"} {
+		if _, err := For(agent, "x"); err == nil {
+			t.Fatalf("unsupported agent %s accepted", agent)
+		}
 	}
-	if _, err := For(Codex, " "); err == nil {
+	if _, err := For(Claude, " "); err == nil {
 		t.Fatal("empty command accepted")
 	}
 }
@@ -141,21 +93,6 @@ func TestHookPathQuoting(t *testing.T) {
 	}
 }
 
-func TestMatchersAndSingleCopilotFile(t *testing.T) {
-	c, _ := For(Codex, "reright-hook")
-	if strings.Contains(c[0].Content, `"matcher": "*"`) {
-		t.Fatal(`codex uses the undocumented matcher "*"`)
-	}
-	cu, _ := For(Cursor, "reright-hook")
-	if !strings.Contains(cu[0].Content, "wait_for_review") {
-		t.Fatalf("cursor post has no matcher: %s", cu[0].Content)
-	}
-	co, _ := For(Copilot, "reright-hook")
-	if len(co) != 1 {
-		t.Fatalf("copilot writes %d hook files", len(co))
-	}
-}
-
 func TestClaudeStopsOnlyWhenNothingIsPending(t *testing.T) {
 	snips, err := For(Claude, "/home/u/.local/bin/reright-hook")
 	if err != nil {
@@ -177,13 +114,7 @@ func TestClaudeStopsOnlyWhenNothingIsPending(t *testing.T) {
 		t.Fatalf("Stop = %+v", stop)
 	}
 	post := cfg.Hooks["PostToolUse"]
-	if len(post) != 1 || post[0].Matcher != "mcp__reright__(submit_for_review|wait_for_review)" {
+	if len(post) != 1 || post[0].Matcher != "mcp__reright__(rewrite|rewrite_result)" {
 		t.Fatalf("PostToolUse = %+v", post)
-	}
-	for _, agent := range []string{Codex, Gemini, Copilot, Cursor} {
-		s, _ := For(agent, "reright-hook")
-		if strings.Contains(s[0].Content, " stop") {
-			t.Errorf("%s got a stop hook, but its stop event is not verified", agent)
-		}
 	}
 }

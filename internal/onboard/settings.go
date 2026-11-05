@@ -7,11 +7,13 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+
+	"github.com/interpt-co/reright-cli/internal/agentcfg"
 )
 
 const hookMarker = "reright-hook"
 
-const postMatcher = "mcp__reright__(submit_for_review|wait_for_review)"
+const postMatcher = agentcfg.ClaudePostMatcher
 
 var errShape = errors.New("settings.json does not have the expected shape (hooks must be an object of lists)")
 
@@ -142,21 +144,11 @@ func StripHooks(raw []byte) ([]byte, error) {
 	return encodeSettings(m)
 }
 
-type hookSpec struct {
-	Event   string
-	Matcher string
-	Sub     string
-	Timeout int
-}
+type hookSpec = agentcfg.ClaudeHook
 
-var hookSpecs = []hookSpec{
-	{"PreToolUse", "*", "pre", 30},
-	{"PostToolUse", postMatcher, "post", 10},
-	{"UserPromptSubmit", "", "prompt", 10},
-	{"Stop", "", "stop", 10},
-}
+var hookSpecs = agentcfg.ClaudeHooks
 
-func (s hookSpec) command(hookPath string) string {
+func hookCommand(s hookSpec, hookPath string) string {
 	return shellQuote(hookPath) + " " + s.Sub
 }
 
@@ -181,7 +173,7 @@ func MergeHooks(raw []byte, hookPath string) ([]byte, error) {
 		if s.Matcher != "" {
 			group["matcher"] = s.Matcher
 		}
-		group["hooks"] = []any{map[string]any{"type": "command", "command": s.command(hookPath), "timeout": s.Timeout}}
+		group["hooks"] = []any{map[string]any{"type": "command", "command": hookCommand(s, hookPath), "timeout": s.Timeout}}
 		existing, _ := hooks[s.Event].([]any)
 		hooks[s.Event] = append(existing, group)
 	}
@@ -222,7 +214,7 @@ func hasHook(hooks map[string]any, s hookSpec, hookPath string) bool {
 			if !ok {
 				continue
 			}
-			if cmd, _ := hm["command"].(string); sameCommand(cmd, s.command(hookPath)) {
+			if cmd, _ := hm["command"].(string); sameCommand(cmd, hookCommand(s, hookPath)) {
 				return true
 			}
 		}

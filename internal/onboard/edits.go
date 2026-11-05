@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
-
-	toml "github.com/pelletier/go-toml/v2"
 )
 
 const (
@@ -143,40 +141,7 @@ func stripHookTree(m map[string]any) (bool, error) {
 	return changed, nil
 }
 
-func mergeHookJSON(raw []byte, content string) ([]byte, error) {
-	m, err := decodeSettings(raw)
-	if err != nil {
-		return nil, err
-	}
-	want, err := decodeSettings([]byte(content))
-	if err != nil {
-		return nil, err
-	}
-	if _, err := stripHookTree(m); err != nil {
-		return nil, err
-	}
-	hooks, err := hooksOf(m)
-	if err != nil {
-		return nil, err
-	}
-	if hooks == nil {
-		hooks = map[string]any{}
-		m["hooks"] = hooks
-	}
-	wantHooks, _ := want["hooks"].(map[string]any)
-	for ev, v := range wantHooks {
-		existing, _ := hooks[ev].([]any)
-		add, _ := v.([]any)
-		hooks[ev] = append(existing, add...)
-	}
-	for k, v := range want {
-		if _, ok := m[k]; !ok && k != "hooks" {
-			m[k] = v
-		}
-	}
-	return encodeSettings(m)
-}
-
+// stripHookJSON removes reright's entries from any agent's hook file, Claude's or an earlier version's.
 func stripHookJSON(raw []byte) ([]byte, error) {
 	m, err := decodeSettings(raw)
 	if err != nil {
@@ -187,87 +152,6 @@ func stripHookJSON(raw []byte) ([]byte, error) {
 		return raw, err
 	}
 	return encodeSettings(m)
-}
-
-type hookLeaf struct {
-	Command    string
-	FailClosed bool
-}
-
-func leavesOf(v any, out *[]hookLeaf) {
-	switch t := v.(type) {
-	case map[string]any:
-		for _, k := range []string{"command", "bash"} {
-			if s, ok := t[k].(string); ok {
-				fc, _ := t["failClosed"].(bool)
-				*out = append(*out, hookLeaf{s, fc})
-			}
-		}
-		for _, c := range t {
-			leavesOf(c, out)
-		}
-	case []any:
-		for _, c := range t {
-			leavesOf(c, out)
-		}
-	}
-}
-
-func hookLeaves(m map[string]any) []hookLeaf {
-	var out []hookLeaf
-	leavesOf(m["hooks"], &out)
-	return out
-}
-
-func hooksCheck(content string) func([]byte) error {
-	return func(raw []byte) error {
-		want, err := decodeSettings([]byte(content))
-		if err != nil {
-			return err
-		}
-		have, err := decodeSettings(raw)
-		if err != nil {
-			return err
-		}
-		var got []hookLeaf
-		for _, l := range hookLeaves(have) {
-			got = append(got, l)
-		}
-		var missing, open []string
-		for _, l := range hookLeaves(want) {
-			var g hookLeaf
-			ok := false
-			for _, cand := range got {
-				if sameCommand(cand.Command, l.Command) {
-					g, ok = cand, true
-					break
-				}
-			}
-			switch {
-			case !ok:
-				missing = append(missing, l.Command)
-			case l.FailClosed && !g.FailClosed:
-				open = append(open, l.Command)
-			}
-		}
-		switch {
-		case len(missing) > 0:
-			return fmt.Errorf("missing or different hook commands: %s", strings.Join(missing, "; "))
-		case len(open) > 0:
-			return fmt.Errorf("these hooks lost failClosed, so a crash or timeout would let the call through: %s", strings.Join(open, "; "))
-		}
-		return nil
-	}
-}
-
-func jsonHooksPart(content string) part {
-	return part{
-		Kind:  "hooks",
-		Tag:   "hooks:" + hookMarker,
-		Apply: func(raw []byte) ([]byte, error) { return mergeHookJSON(raw, content) },
-		Strip: stripHookJSON,
-		Check: hooksCheck(content),
-	}
 }
 
 func claudeHooksPart(hookPath string) part {
@@ -286,64 +170,26 @@ func claudeHooksPart(hookPath string) part {
 	}
 }
 
-func jsonMCPPart(topKey string, entry map[string]any) part {
-	return part{
-		Kind: "mcp",
-		Tag:  "mcp:" + topKey + "." + mcpName,
-		Apply: func(raw []byte) ([]byte, error) {
-			m, err := decodeSettings(raw)
-			if err != nil {
-				return nil, err
-			}
-			servers, err := serversOf(m, topKey)
-			if err != nil {
-				return nil, err
-			}
-			if servers == nil {
-				servers = map[string]any{}
-				m[topKey] = servers
-			}
-			servers[mcpName] = entry
-			return encodeSettings(m)
-		},
-		Strip: func(raw []byte) ([]byte, error) {
-			m, err := decodeSettings(raw)
-			if err != nil {
-				return nil, err
-			}
-			servers, err := serversOf(m, topKey)
-			if err != nil || servers == nil {
-				return raw, err
-			}
-			if _, ok := servers[mcpName]; !ok {
-				return raw, nil
-			}
-			delete(servers, mcpName)
-			if len(servers) == 0 {
-				delete(m, topKey)
-			}
-			return encodeSettings(m)
-		},
-		Check: func(raw []byte) error {
-			m, err := decodeSettings(raw)
-			if err != nil {
-				return err
-			}
-			servers, err := serversOf(m, topKey)
-			if err != nil {
-				return err
-			}
-			have, ok := servers[mcpName]
-			if !ok {
-				return fmt.Errorf("no %s.%s entry", topKey, mcpName)
-			}
-			a, _ := json.Marshal(have)
-			b, _ := json.Marshal(entry)
-			if !bytes.Equal(a, b) {
-				return fmt.Errorf("the %s.%s entry differs from the one install writes (stale URL or device token)", topKey, mcpName)
-			}
-			return nil
-		},
+// stripJSONMCP removes the reright server that an earlier version added under topKey (mcpServers or
+// servers) for an agent this version no longer sets up.
+func stripJSONMCP(topKey string) func([]byte) ([]byte, error) {
+	return func(raw []byte) ([]byte, error) {
+		m, err := decodeSettings(raw)
+		if err != nil {
+			return nil, err
+		}
+		servers, err := serversOf(m, topKey)
+		if err != nil || servers == nil {
+			return raw, err
+		}
+		if _, ok := servers[mcpName]; !ok {
+			return raw, nil
+		}
+		delete(servers, mcpName)
+		if len(servers) == 0 {
+			delete(m, topKey)
+		}
+		return encodeSettings(m)
 	}
 }
 
@@ -359,73 +205,8 @@ func serversOf(m map[string]any, key string) (map[string]any, error) {
 	return s, nil
 }
 
+// tomlBlockPattern finds the block an earlier version wrote into ~/.codex/config.toml.
 var tomlBlockPattern = regexp.MustCompile(`(?s)\n?` + regexp.QuoteMeta(tomlStart) + `.*?` + regexp.QuoteMeta(tomlEnd) + `\n?`)
-
-func tomlBlock(url, token string) string {
-	return fmt.Sprintf("%s\n[mcp_servers.%s]\nurl = %q\nhttp_headers = { Authorization = %q }\n%s\n", tomlStart, mcpName, url, "Bearer "+token, tomlEnd)
-}
-
-func tomlMCPPart(url, token string) part {
-	block := tomlBlock(url, token)
-	strip := func(raw []byte) ([]byte, error) {
-		return tomlBlockPattern.ReplaceAll(raw, nil), nil
-	}
-	return part{
-		Kind: "mcp",
-		Tag:  "mcp:mcp_servers." + mcpName,
-		Apply: func(raw []byte) ([]byte, error) {
-			cur, _ := strip(raw)
-			var doc map[string]any
-			if err := toml.Unmarshal(cur, &doc); err != nil {
-				return nil, fmt.Errorf("the file is not valid TOML (%v). reright will not edit it. Fix the file, or add the [mcp_servers.%s] table by hand", err, mcpName)
-			}
-			if servers, ok := doc["mcp_servers"]; ok {
-				table, isTable := servers.(map[string]any)
-				if !isTable {
-					return nil, fmt.Errorf("mcp_servers is not a table, so reright cannot add [mcp_servers.%s]. Fix the file, then run install again", mcpName)
-				}
-				if _, found := table[mcpName]; found {
-					return nil, fmt.Errorf("it already defines [mcp_servers.%s] and reright did not write it. Remove that table or rename it, then run install again", mcpName)
-				}
-			}
-			s := string(cur)
-			next := block
-			if strings.TrimSpace(s) != "" {
-				if !strings.HasSuffix(s, "\n") {
-					s += "\n"
-				}
-				next = s + "\n" + block
-			}
-			var check map[string]any
-			if err := toml.Unmarshal([]byte(next), &check); err != nil {
-				return nil, fmt.Errorf("adding [mcp_servers.%s] would make the file invalid TOML (%v), so reright left it alone. Add the table by hand", mcpName, err)
-			}
-			return []byte(next), nil
-		},
-		Strip: strip,
-		Check: func(raw []byte) error {
-			if !bytes.Contains(raw, []byte(block)) {
-				if bytes.Contains(raw, []byte(tomlStart)) {
-					return fmt.Errorf("the [mcp_servers.%s] block differs from the one install writes (stale URL or device token)", mcpName)
-				}
-				return fmt.Errorf("no [mcp_servers.%s] block", mcpName)
-			}
-			return nil
-		},
-	}
-}
-
-var featuresSection = regexp.MustCompile(`(?ms)^\[features\]\s*\n(.*?)(?:^\[|\z)`)
-var hooksOff = regexp.MustCompile(`(?m)^\s*(hooks|codex_hooks)\s*=\s*false\b`)
-
-func codexHooksDisabled(raw []byte) bool {
-	for _, m := range featuresSection.FindAllSubmatch(raw, -1) {
-		if hooksOff.Match(m[1]) {
-			return true
-		}
-	}
-	return false
-}
 
 func rulesPart(block string) part {
 	return part{
@@ -484,9 +265,9 @@ func stripperForTag(tag string) func([]byte) ([]byte, error) {
 	case "mcp":
 		top, _, _ := strings.Cut(rest, ".")
 		if top == "mcp_servers" {
-			return tomlMCPPart("", "").Strip
+			return func(raw []byte) ([]byte, error) { return tomlBlockPattern.ReplaceAll(raw, nil), nil }
 		}
-		return jsonMCPPart(top, nil).Strip
+		return stripJSONMCP(top)
 	}
 	return func(raw []byte) ([]byte, error) { return raw, nil }
 }

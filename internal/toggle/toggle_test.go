@@ -81,14 +81,14 @@ func TestDamagedFileIsAnError(t *testing.T) {
 
 func TestExpand(t *testing.T) {
 	got, err := Expand([]string{"all"})
-	if err != nil || len(got) != len(Kinds) {
+	if err != nil || len(got) != len(Checks) {
 		t.Fatalf("%v %v", got, err)
 	}
-	if _, err := Expand([]string{"commits"}); err == nil || !strings.Contains(err.Error(), "unknown kind") {
+	if _, err := Expand([]string{"commits"}); err == nil || !strings.Contains(err.Error(), "unknown check") {
 		t.Fatalf("err %v", err)
 	}
 	if _, err := Expand(nil); err == nil {
-		t.Fatal("want an error for no kinds")
+		t.Fatal("want an error for no checks")
 	}
 }
 
@@ -108,5 +108,35 @@ func TestLines(t *testing.T) {
 	out := strings.Join(f.Lines(t0), "\n")
 	if !strings.Contains(out, "commit   OFF") || !strings.Contains(out, "/work/internal") || !strings.Contains(out, "gh       on") {
 		t.Fatalf("\n%s", out)
+	}
+}
+
+// Older versions had browser and http checks. A state file that still names them loads, the old entries
+// are ignored, and enable all removes the file.
+func TestOldChecksInStateFileAreIgnored(t *testing.T) {
+	dir := t.TempDir()
+	old := `{"disabled":{"browser":{},"http":{"until":"2999-01-01T00:00:00Z"},"commit":{"dirs":["/work"]}}}`
+	if err := os.WriteFile(Path(dir), []byte(old), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f, err := Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	if _, ok := f.Disabled["browser"]; ok {
+		t.Error("browser entry was kept")
+	}
+	if f.Off("http", "/", now) {
+		t.Error("http counts as off")
+	}
+	if !f.Off("commit", "/work/repo", now) || f.Off("commit", "/elsewhere", now) {
+		t.Error("the commit entry next to the old ones was not read")
+	}
+	if err := Enable(dir, Checks, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(Path(dir)); !os.IsNotExist(err) {
+		t.Errorf("enable all left the state file behind: %v", err)
 	}
 }

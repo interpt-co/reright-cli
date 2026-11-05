@@ -1,5 +1,5 @@
-// Command reright-hook is run by Claude Code hooks. It blocks human-facing
-// text that has not been approved in reright, and stops a session after a reject.
+// Command reright-hook is run by Claude Code hooks. It blocks commit messages, gh text
+// and Gmail sends that did not go through reright, and stops a session after a reject.
 package main
 
 import (
@@ -31,12 +31,9 @@ func main() {
 	url := firstNonEmpty(os.Getenv("RERIGHT_URL"), readTrim(filepath.Join(cfgDir, "url")), defaultURL)
 	token := firstNonEmpty(os.Getenv("RERIGHT_TOKEN"), readTrim(filepath.Join(cfgDir, "token")))
 	if len(os.Args) > 1 && os.Args[1] == "git" {
-		os.Exit(githook.Main(os.Args[2:], os.Stdin, os.Stdout, os.Stderr, githook.Env{
-			StateDir:  filepath.Join(home, ".local", "state", "reright"),
-			Checker:   hookcli.HTTPChecker{BaseURL: url, Token: token, Version: version},
-			Getenv:    os.Getenv,
-			ConfigDir: cfgDir,
-		}))
+		// The git hooks of reright 0.1 still call this until reright upgrade removes them. It no longer
+		// checks anything there.
+		os.Exit(githook.Main(os.Args[2:], os.Stdin, os.Stdout, os.Stderr, githook.Env{Getenv: os.Getenv, Home: home}))
 	}
 	agent, sub, err := hookcli.ParseArgs(os.Args[1:])
 	if err != nil {

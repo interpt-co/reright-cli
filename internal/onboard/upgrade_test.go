@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -33,6 +34,8 @@ type upgradeWorld struct {
 func newUpgradeWorld(t *testing.T, latest string) *upgradeWorld {
 	t.Helper()
 	w := &upgradeWorld{t: t, home: t.TempDir(), cliNew: []byte("new reright " + latest), hookNew: []byte("new hook " + latest)}
+	t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(w.home, ".gitconfig"))
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
 	pub, priv, err := ed25519.GenerateKey(nil)
 	if err != nil {
 		t.Fatal(err)
@@ -291,5 +294,69 @@ func TestUpgradeLeavesSettingsWithoutRerightHooksAlone(t *testing.T) {
 	}
 	if got := w.read(p.Settings()); got != `{"model": "x"}` {
 		t.Fatalf("settings rewritten: %s", got)
+	}
+}
+
+func globalHooksPathIn(t *testing.T, home string) string {
+	t.Helper()
+	out, _ := exec.Command("git", "config", "--file", filepath.Join(home, ".gitconfig"), "--get", "core.hooksPath").Output()
+	return strings.TrimSpace(string(out))
+}
+
+// The git layer goes on upgrade, also when the programs are already current, because a 0.1 reright ran the
+// upgrade that brought this version and did not know to remove it.
+func TestUpgradeRemovesTheGitLayerThatPointsAtOurHooks(t *testing.T) {
+	w := newUpgradeWorld(t, "v0.1.1")
+	w.hookOld = "#!/bin/sh\necho 'reright-hook v0.1.1 (linux/amd64)'\n"
+	dir := writeOldGitLayer(t, w.home, "")
+	w.opts.CheckOnly = true
+	if err := Upgrade(context.Background(), w.opts); err != nil {
+		t.Fatal(err)
+	}
+	if globalHooksPathIn(t, w.home) != dir || !strings.Contains(w.out(), "reright upgrade removes them") {
+		t.Fatalf("--check changed the layer or did not mention it:\n%s", w.out())
+	}
+	w.opts.CheckOnly = false
+	if err := Upgrade(context.Background(), w.opts); err != nil {
+		t.Fatal(err)
+	}
+	if got := globalHooksPathIn(t, w.home); got != "" {
+		t.Fatalf("core.hooksPath is still %q", got)
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatal("the wrappers are still there")
+	}
+	if _, err := os.Stat(filepath.Join(w.home, ".config/reright/git-install.json")); !os.IsNotExist(err) {
+		t.Fatal("git-install.json is still there")
+	}
+	if !strings.Contains(w.out(), "removed the git hooks of an earlier version") || !strings.Contains(w.out(), "up to date") {
+		t.Fatalf("output:\n%s", w.out())
+	}
+}
+
+// A core.hooksPath that someone else set (husky, a dotfiles hooks dir) stays, and so do the files in it.
+// The lines the user added there by hand are listed.
+func TestUpgradeLeavesSomeoneElsesHooksPath(t *testing.T) {
+	w := newUpgradeWorld(t, "v0.1.2")
+	theirs := filepath.Join(w.home, "their-hooks")
+	os.MkdirAll(theirs, 0o755)
+	line := "#!/bin/sh\nif [ -x '" + w.hook + "' ]; then RERIGHT_GIT_PPID=$PPID '" + w.hook + "' git commit-msg \"$@\" || exit $?; fi\n"
+	os.WriteFile(filepath.Join(theirs, "commit-msg"), []byte(line), 0o755)
+	dir := writeOldGitLayer(t, w.home, theirs)
+	before := w.read(filepath.Join(w.home, ".gitconfig"))
+	if err := Upgrade(context.Background(), w.opts); err != nil {
+		t.Fatal(err)
+	}
+	if got := w.read(filepath.Join(w.home, ".gitconfig")); got != before || globalHooksPathIn(t, w.home) != theirs {
+		t.Fatalf("their git config changed:\n%s", got)
+	}
+	if w.read(filepath.Join(theirs, "commit-msg")) != line {
+		t.Fatal("their hook file changed")
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatal("reright's wrappers are still there")
+	}
+	if !strings.Contains(w.out(), filepath.Join(theirs, "commit-msg")) {
+		t.Fatalf("the hand-added line is not listed:\n%s", w.out())
 	}
 }
