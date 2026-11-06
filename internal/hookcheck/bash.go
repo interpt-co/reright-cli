@@ -1,6 +1,7 @@
 package hookcheck
 
 import (
+	"path"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -19,6 +20,44 @@ type shell struct {
 	// compound is true when the line runs more than one command or redirects
 	// output. A message file may then be written after the hook reads it.
 	compound bool
+	// ownRepo is Options.OwnRepo.
+	ownRepo func(dir string) bool
+	// cdTo is the directory of the one literal cd or pushd on the line, and cdUnknown is set when the line
+	// changes directory in a way the hook cannot follow. A git call may then run in either directory.
+	cdTo      string
+	cdUnknown bool
+}
+
+// gitEnvRe finds the variables that move git to another repository or configuration.
+var gitEnvRe = regexp.MustCompile(`\bGIT_(DIR|WORK_TREE|COMMON_DIR|CONFIG[A-Z_]*|INDEX_FILE|NAMESPACE|CEILING_DIRECTORIES|DISCOVERY_ACROSS_FILESYSTEM)\b`)
+
+// own reports whether a git call that would run in cwd, after the -C directories in cs, is in a
+// repository only the user reads. Every directory the call could run in must be one.
+func (sh shell) own(cwd string, cs []string) bool {
+	if sh.ownRepo == nil || sh.cdUnknown {
+		return false
+	}
+	bases := []string{cwd}
+	if sh.cdTo != "" {
+		bases = append(bases, sh.cdTo)
+	}
+	for _, b := range bases {
+		if !sh.ownRepo(applyC(b, cs)) {
+			return false
+		}
+	}
+	return true
+}
+
+func applyC(dir string, cs []string) string {
+	for _, c := range cs {
+		if filepath.IsAbs(c) {
+			dir = c
+		} else {
+			dir = filepath.Join(dir, c)
+		}
+	}
+	return dir
 }
 
 // readFile returns the contents of a message file, or a problem when the hook
@@ -43,7 +82,10 @@ func (sh shell) readFile(what, name string) (string, *Result) {
 // Bash inspects a shell command for git commits and tags and gh calls that carry text.
 // Text that only reaches git or gh through another program (a script, eval, bash -c,
 // xargs) is not looked for.
-func Bash(command, cwd string) Result {
+func Bash(command, cwd string) Result { return BashWith(command, cwd, Options{}) }
+
+// BashWith is Bash with options.
+func BashWith(command, cwd string, opts Options) Result {
 	file, err := syntax.NewParser().Parse(strings.NewReader(command), "")
 	if err != nil {
 		if mentionsGitOrGh.MatchString(command) {
@@ -51,10 +93,16 @@ func Bash(command, cwd string) Result {
 		}
 		return Result{}
 	}
-	sh := shell{cwd: cwd, compound: true}
+	sh := shell{cwd: cwd, compound: true, ownRepo: opts.OwnRepo}
 	if len(file.Stmts) == 1 && len(file.Stmts[0].Redirs) == 0 {
 		_, single := file.Stmts[0].Cmd.(*syntax.CallExpr)
 		sh.compound = !single
+	}
+	if sh.ownRepo != nil {
+		sh.cdTo, sh.cdUnknown = directoryChanges(file, cwd)
+		if gitEnvRe.MatchString(command) {
+			sh.cdUnknown = true
+		}
 	}
 	var res Result
 	syntax.Walk(file, func(n syntax.Node) bool {
@@ -230,15 +278,56 @@ func heredocBody(r *syntax.Redirect) (string, bool) {
 	return v, err == nil
 }
 
+// directoryChanges finds the cd, pushd and popd calls on a line. One cd or pushd to a literal directory is
+// followed; anything else makes the directory unknown.
+func directoryChanges(file *syntax.File, cwd string) (to string, unknown bool) {
+	count := 0
+	syntax.Walk(file, func(n syntax.Node) bool {
+		call, ok := n.(*syntax.CallExpr)
+		if !ok || len(call.Args) == 0 {
+			return true
+		}
+		name, ok := wordValue(call.Args[0])
+		if !ok {
+			return true
+		}
+		switch path.Base(name) {
+		case "cd", "pushd":
+			count++
+			if len(call.Args) != 2 {
+				unknown = true
+				return true
+			}
+			d, ok := wordValue(call.Args[1])
+			if !ok || d == "-" || d == "" || strings.HasPrefix(d, "~") {
+				unknown = true
+				return true
+			}
+			to = applyC(cwd, []string{d})
+		case "popd":
+			unknown = true
+		}
+		return true
+	})
+	if count > 1 {
+		unknown = true
+	}
+	return to, unknown
+}
+
 func unreadable(what string) Result {
 	return problem(what + " is built from a variable or command output the hook cannot read. " + plainArgs)
 }
 
 func gitCall(args []arg, sh shell) Result {
+	base := sh.cwd
 	dir := sh.cwd
 	// A -C directory built from a variable only matters for the subcommands that carry text, because the
 	// directory decides which repository's message file and hooks apply. rev-parse, status and log are harmless.
 	dirUnknown := false
+	// otherRepo is set by options that point git at another repository or work tree.
+	otherRepo := false
+	var cs []string
 	i := 0
 	for ; i < len(args); i++ {
 		a := args[i]
@@ -255,11 +344,15 @@ func gitCall(args []arg, sh shell) Result {
 				dirUnknown = true
 				continue
 			}
-			if filepath.IsAbs(args[i].s) {
-				dir = args[i].s
-			} else {
-				dir = filepath.Join(dir, args[i].s)
-			}
+			cs = append(cs, args[i].s)
+			dir = applyC(dir, []string{args[i].s})
+			continue
+		case (a.s == "--git-dir" || a.s == "--work-tree" || a.s == "--namespace") && i+1 < len(args):
+			otherRepo = true
+			i++
+			continue
+		case strings.HasPrefix(a.s, "--git-dir=") || strings.HasPrefix(a.s, "--work-tree=") || strings.HasPrefix(a.s, "--namespace="):
+			otherRepo = true
 			continue
 		case a.s == "-c" && i+1 < len(args):
 			i++
@@ -278,10 +371,21 @@ func gitCall(args []arg, sh shell) Result {
 		if dirUnknown {
 			return problem("git -C with a directory the hook cannot read, on a command that carries text. Write the directory out literally.")
 		}
-		if args[i].s == "commit" {
-			return gitCommit(args[i+1:], sh)
+		// Only text other people read goes through reright. In a repository only the user works on, the
+		// commit, tag or merge message is left alone.
+		if !otherRepo && sh.own(base, cs) {
+			return Result{}
 		}
-		return gitMessage(args[i].s, args[i+1:], sh)
+		var r Result
+		if args[i].s == "commit" {
+			r = gitCommit(args[i+1:], sh)
+		} else {
+			r = gitMessage(args[i].s, args[i+1:], sh)
+		}
+		for k := range r.Texts {
+			r.Texts[k].Dir = dir
+		}
+		return r
 	}
 	return Result{}
 }

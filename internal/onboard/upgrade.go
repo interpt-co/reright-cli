@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -160,6 +161,11 @@ func Upgrade(ctx context.Context, o UpgradeOptions) error {
 	fmt.Fprintf(o.Out, "Replaced %s\n", o.ExePath)
 	if hookInstalled {
 		refreshClaudeHooks(Paths{o.Home}, hookPath, o.Out)
+		// The new hook knows the new rules text for ~/.claude/CLAUDE.md, so it writes it. A hook older
+		// than this does the same on its first call.
+		hctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		exec.CommandContext(hctx, hookPath, "heal").Run()
+		cancel()
 	}
 	fmt.Fprintf(o.Out, "Upgraded to reright %s (was reright %s). Run reright doctor to check the setup.\n", latest, o.Current)
 	return nil
@@ -218,14 +224,25 @@ const healEvery = 24 * time.Hour
 // not the settings, so the new hook adds the entries it needs itself, at most once a day for each settings
 // file. It also removes the git hooks an earlier version installed. RERIGHT_NO_SELF_HEAL=1 turns it off.
 // It also brings the reright rule block in ~/.claude/CLAUDE.md up to date. It writes nothing to the terminal;
-// the caller ignores errors.
+// the caller ignores errors. The once-a-day marker is kept per rule block, so a hook with a new rule block
+// heals on its first call after an upgrade even when the old hook healed earlier that day.
 func HealClaudeHooks(home, stateDir string, getenv func(string) string, now time.Time) error {
+	return healClaude(home, stateDir, getenv, now, false)
+}
+
+// HealClaudeHooksNow is HealClaudeHooks without the once-a-day wait. reright upgrade runs it through the
+// new hook (reright-hook heal), so the new rule block is written at once.
+func HealClaudeHooksNow(home, stateDir string, getenv func(string) string, now time.Time) error {
+	return healClaude(home, stateDir, getenv, now, true)
+}
+
+func healClaude(home, stateDir string, getenv func(string) string, now time.Time, force bool) error {
 	if getenv("RERIGHT_NO_SELF_HEAL") == "1" || home == "" || stateDir == "" {
 		return nil
 	}
 	p := Paths{home}
-	marker := filepath.Join(stateDir, "selfheal", sha([]byte(p.Settings()))[:16])
-	if b, err := os.ReadFile(marker); err == nil {
+	marker := filepath.Join(stateDir, "selfheal", sha([]byte(p.Settings() + "\x00" + ruleBlock))[:16])
+	if b, err := os.ReadFile(marker); err == nil && !force {
 		if t, err := time.Parse(time.RFC3339, strings.TrimSpace(string(b))); err == nil && now.Sub(t) < healEvery && !t.After(now) {
 			return nil
 		}

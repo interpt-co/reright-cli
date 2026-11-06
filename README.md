@@ -1,6 +1,6 @@
 # reright-cli
 
-The command-line part of [reright](https://reright.it): the `reright` installer and the `reright-hook` program that Claude Code runs before it sends text a person will read.
+The command-line part of [reright](https://reright.it): the `reright` installer and the `reright-hook` program that Claude Code runs before it sends text that someone besides the user will read.
 
 reright rewrites the commit messages, PR text, emails and similar writing an agent produces so they sound like you, and can hold them for your approval first. The server is a hosted service and is not in this repository. Everything that runs on your machine is.
 

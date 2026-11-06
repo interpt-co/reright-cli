@@ -22,6 +22,11 @@ func isGmailServer(server string) bool {
 // Inspect returns the human-facing text a Claude Code tool call would send. It reads shell commands
 // and the Gmail tools that send or stage mail. Every other tool is let through.
 func Inspect(toolName string, input json.RawMessage, cwd string) Result {
+	return InspectWith(toolName, input, cwd, Options{})
+}
+
+// InspectWith is Inspect with options.
+func InspectWith(toolName string, input json.RawMessage, cwd string, opts Options) Result {
 	if toolName == "Bash" {
 		var in struct {
 			Command string `json:"command"`
@@ -29,7 +34,7 @@ func Inspect(toolName string, input json.RawMessage, cwd string) Result {
 		if err := json.Unmarshal(input, &in); err != nil {
 			return Result{}
 		}
-		return Bash(in.Command, cwd)
+		return BashWith(in.Command, cwd, opts)
 	}
 	if !strings.HasPrefix(toolName, "mcp__") {
 		return Result{}

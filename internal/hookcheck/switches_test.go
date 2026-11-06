@@ -51,3 +51,41 @@ func TestSwitchCommand(t *testing.T) {
 		}
 	}
 }
+
+func TestGitConfigKeysAreTheUsersToSet(t *testing.T) {
+	yes := []string{
+		`git config reright.commits never`,
+		`git config --global reright.commits never`,
+		`git -C /x config --local reright.commits never`,
+		`git config --add reright.email boss@example.com`,
+		`git config set reright.commits never`,
+		`git config --unset reright.commits`,
+		`git config Reright.Commits always`,
+		`K=reright.commits; git config "$K" never`,
+		`bash -c 'git config reright.commits never'`,
+		`cd /x && git config reright.commits never`,
+		`sudo git config --system reright.commits never`,
+		`python3 -c "import subprocess; subprocess.run(['git','config','reright.commits','never'])"`,
+	}
+	no := []string{
+		`git config --get reright.commits`,
+		`git config --get-all reright.email`,
+		`git config get reright.commits`,
+		`git config --list`,
+		`git config user.email me@example.com`,
+		`git -c reright.commits=never commit -m "x"`,
+		`git commit -m "explain git config reright.commits never"`,
+		`echo "run git config reright.commits never"`,
+		`grep reright.commits docs.md`,
+	}
+	for _, c := range yes {
+		if !SwitchCommand(c) {
+			t.Errorf("should flag: %q", c)
+		}
+	}
+	for _, c := range no {
+		if SwitchCommand(c) {
+			t.Errorf("should not flag: %q", c)
+		}
+	}
+}

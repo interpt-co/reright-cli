@@ -11,6 +11,8 @@ import (
 type Text struct {
 	Source string
 	Value  string
+	// Dir is the directory a git commit, tag or merge runs in. It is empty for other texts.
+	Dir string
 }
 
 // Result lists the texts a tool call would send. Problem is set when the call
@@ -38,6 +40,14 @@ func (r *Result) merge(o Result) {
 }
 
 func problem(msg string) Result { return Result{Problem: msg} }
+
+// Options change what Inspect looks for.
+type Options struct {
+	// OwnRepo reports whether only the user reads the commit messages of the repository at dir. Commits,
+	// tags and merges there are let through without a look at their text. Nil means every repository is
+	// shared. It is asked only when the hook can tell for sure which repository a call runs in.
+	OwnRepo func(dir string) bool
+}
 
 func readRelative(dir, path string) (string, error) {
 	if !filepath.IsAbs(path) {

@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/interpt-co/reright-cli/internal/audience"
 	"github.com/interpt-co/reright-cli/internal/draft"
 	"github.com/interpt-co/reright-cli/internal/hookcheck"
 	"github.com/interpt-co/reright-cli/internal/toggle"
@@ -40,6 +41,9 @@ type Env struct {
 	ReleaseURL string
 	// HTTP is the client for that fetch. Nil means a client with a short timeout.
 	HTTP *http.Client
+	// Audience decides whether other people read the commit messages of the repository at dir. Commit, tag
+	// and merge messages are checked only where it says shared. Nil means every repository is shared.
+	Audience func(ctx context.Context, dir string) audience.Decision
 	// Heal brings the Claude Code hook settings up to date after an upgrade. Nil means no healing. It runs
 	// after the decision is written, and its errors and panics are ignored.
 	Heal func()
@@ -156,7 +160,19 @@ func pre(ctx context.Context, in call, env Env) string {
 		return ""
 	}
 	off := switchedOff(env, in.Cwd)
-	res := hookcheck.Inspect(in.Tool, in.Input, in.Cwd)
+	decided := map[string]audience.Decision{}
+	own := func(dir string) bool {
+		if env.Audience == nil {
+			return false
+		}
+		d, ok := decided[dir]
+		if !ok {
+			d = env.Audience(ctx, dir)
+			decided[dir] = d
+		}
+		return !d.Shared
+	}
+	res := hookcheck.InspectWith(in.Tool, in.Input, in.Cwd, hookcheck.Options{OwnRepo: own})
 	if res.Problem != "" && !waived(off, hookcheck.ProblemKinds(in.Tool, in.Input)) {
 		return "reright: " + res.Problem + " Nothing was sent." + switchHint(hookcheck.ProblemKinds(in.Tool, in.Input))
 	}
@@ -180,7 +196,11 @@ func pre(ctx context.Context, in call, env Env) string {
 			return fmt.Sprintf("reright: could not reach the review server to check the %s (%v). Nothing was sent. Tell the user; they can set RERIGHT_OFFLINE=allow to work offline.", t.Source, err)
 		}
 		if !ok {
-			return fmt.Sprintf("reright: the %s did not go through reright. Call the reright tool rewrite with this exact text and its context, wait for it to finish, then run this again using final_text exactly as returned.", t.Source)
+			why := ""
+			if d, seen := decided[t.Dir]; seen && t.Dir != "" {
+				why = " reright checks commit messages in this repository because " + d.Why + ". If nobody besides the user reads them, the user can run `git config reright.commits never` in it; do not run it yourself."
+			}
+			return fmt.Sprintf("reright: the %s did not go through reright. Call the reright tool rewrite with this exact text and its context, wait for it to finish, then run this again using final_text exactly as returned.%s", t.Source, why)
 		}
 	}
 	return ""
@@ -247,7 +267,7 @@ func guardSwitches(in call) string {
 	if json.Unmarshal(in.Input, &b) != nil || !hookcheck.SwitchCommand(b.Command) {
 		return ""
 	}
-	return "reright: only the user can turn reright's checks on or off. Do not run `reright disable` or `reright enable`, and do not edit enforcement.json. Tell the user what you need and ask them to run it in their own terminal."
+	return "reright: only the user can turn reright's checks on or off. Do not run `reright disable` or `reright enable`, do not set the reright git config keys (reright.commits, reright.email), and do not edit enforcement.json. Tell the user what you need and ask them to run it in their own terminal."
 }
 
 func post(in call, stderr io.Writer, env Env) {

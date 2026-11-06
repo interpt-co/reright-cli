@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/interpt-co/reright-cli/internal/audience"
 	"github.com/interpt-co/reright-cli/internal/githook"
 	"github.com/interpt-co/reright-cli/internal/hookcli"
 	"github.com/interpt-co/reright-cli/internal/onboard"
@@ -30,6 +31,15 @@ func main() {
 	cfgDir := filepath.Join(home, ".config", "reright")
 	url := firstNonEmpty(os.Getenv("RERIGHT_URL"), readTrim(filepath.Join(cfgDir, "url")), defaultURL)
 	token := firstNonEmpty(os.Getenv("RERIGHT_TOKEN"), readTrim(filepath.Join(cfgDir, "token")))
+	if len(os.Args) == 2 && os.Args[1] == "heal" {
+		// reright upgrade runs this after it replaced the hook, so the rules text in CLAUDE.md is the new one.
+		stateDir := filepath.Join(home, ".local", "state", "reright")
+		if err := onboard.HealClaudeHooksNow(home, stateDir, os.Getenv, time.Now()); err != nil {
+			fmt.Fprintln(os.Stderr, "reright-hook:", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if len(os.Args) > 1 && os.Args[1] == "git" {
 		// The git hooks of reright 0.1 still call this until reright upgrade removes them. It no longer
 		// checks anything there.
@@ -50,6 +60,9 @@ func main() {
 		Version:    version,
 		ReleaseURL: os.Getenv("RERIGHT_RELEASE_URL"),
 		Heal:       func() { onboard.HealClaudeHooks(home, stateDir, os.Getenv, time.Now()) },
+		Audience: audience.Detector{
+			Public: audience.HostingProbe{Dir: filepath.Join(stateDir, "public")}.Public,
+		}.Decide,
 	})
 	cancel()
 	os.Exit(code)

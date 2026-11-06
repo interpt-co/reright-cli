@@ -12,6 +12,12 @@ const stateFile = "enforcement.json"
 
 var disableOrEnable = regexp.MustCompile(`(?i)\b(disable|enable)\b`)
 
+// gitKeyRe finds the git config keys that decide which repositories the hook checks.
+var gitKeyRe = regexp.MustCompile(`(?i)\breright\.(commits|email)\b`)
+
+// gitConfigReads are the git config options and subcommands that only read.
+var gitConfigReads = map[string]bool{"--get": true, "--get-all": true, "--get-regexp": true, "--get-urlmatch": true, "--list": true, "-l": true, "get": true, "list": true}
+
 // The switch guard still looks inside bash -c, eval and inline interpreter code, because an agent that
 // turns the checks off that way would get past every other check.
 var (
@@ -97,7 +103,7 @@ func switchAt(command string, depth int) bool {
 	file, err := syntax.NewParser().Parse(strings.NewReader(command), "")
 	if err != nil {
 		// Cannot read it, so fall back to the plain words.
-		return strings.Contains(command, stateFile) || (strings.Contains(command, "reright") && disableOrEnable.MatchString(command))
+		return strings.Contains(command, stateFile) || (strings.Contains(command, "reright") && disableOrEnable.MatchString(command)) || gitKeyRe.MatchString(command)
 	}
 	found := false
 	syntax.Walk(file, func(n syntax.Node) bool {
@@ -157,6 +163,8 @@ func switchCall(command string, call *syntax.CallExpr, depth int) bool {
 				return true
 			}
 		}
+	case name == "git":
+		return gitConfigWrite(args[1:], texts[1:], command)
 	case name == "reright":
 		for _, a := range args[1:] {
 			if a.ok && strings.HasPrefix(a.s, "-") {
@@ -190,7 +198,7 @@ func switchCall(command string, call *syntax.CallExpr, depth int) bool {
 				if args[i+2].ok {
 					code = args[i+2].s
 				}
-				if strings.Contains(code, stateFile) || (strings.Contains(code, "reright") && disableOrEnable.MatchString(code)) {
+				if strings.Contains(code, stateFile) || (strings.Contains(code, "reright") && disableOrEnable.MatchString(code)) || gitKeyRe.MatchString(code) {
 					return true
 				}
 			}
@@ -202,4 +210,45 @@ func switchCall(command string, call *syntax.CallExpr, depth int) bool {
 		}
 	}
 	return false
+}
+
+// gitConfigWrite reports whether a git call writes reright.commits or reright.email. Those keys decide
+// whether commit messages are checked, so only the user sets them. Reading them is fine, and so is
+// git -c reright.commits=..., because the hook reads the configuration with its own git call.
+func gitConfigWrite(args []arg, texts []string, command string) bool {
+	i := 0
+	for ; i < len(args); i++ {
+		if !args[i].ok {
+			return false
+		}
+		s := args[i].s
+		if (s == "-C" || s == "-c" || s == "--git-dir" || s == "--work-tree") && i+1 < len(args) {
+			i++
+			continue
+		}
+		if strings.HasPrefix(s, "-") {
+			continue
+		}
+		break
+	}
+	if i >= len(args) || args[i].s != "config" {
+		return false
+	}
+	key := false
+	for j, a := range args[i+1:] {
+		if !a.ok {
+			// a key built from a variable counts when the line names one of the keys anywhere
+			if gitKeyRe.MatchString(texts[i+1+j]) || gitKeyRe.MatchString(command) {
+				key = true
+			}
+			continue
+		}
+		if gitConfigReads[a.s] {
+			return false
+		}
+		if gitKeyRe.MatchString(a.s) {
+			key = true
+		}
+	}
+	return key
 }
