@@ -24,6 +24,12 @@ type Checker interface {
 	Approved(ctx context.Context, sha string) (bool, error)
 }
 
+// StatusChecker asks the reright server for the status of drafts by id. An id the account does not own
+// comes back as "unknown".
+type StatusChecker interface {
+	Statuses(ctx context.Context, ids []string) (map[string]string, error)
+}
+
 type Env struct {
 	StateDir string
 	Checker  Checker
@@ -38,6 +44,9 @@ type Env struct {
 	ReleaseURL string
 	// HTTP is the client for that fetch. Nil means a client with a short timeout.
 	HTTP *http.Client
+	// Status asks the server where drafts stand, so the Stop check can resolve them without the agent.
+	// Nil means the Stop check knows only what the agent fetched.
+	Status StatusChecker
 	// Audience decides whether other people read the commit messages of the repository at dir. Commit, tag
 	// and merge messages are checked only where it says shared. Nil means every repository is shared.
 	Audience func(ctx context.Context, dir string) audience.Decision
@@ -92,7 +101,7 @@ func RunAgent(ctx context.Context, agent, sub string, stdin io.Reader, stdout, s
 		}
 	case "stop":
 		if ad.stop != nil {
-			block, note := stopCheck(c, decodeErr, env)
+			block, note := stopCheck(ctx, c, decodeErr, env)
 			ad.stop(stdout, block, note)
 		}
 	case "prompt":

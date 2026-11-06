@@ -99,12 +99,12 @@ func TestBadSettingsShapes(t *testing.T) {
 func TestMissingHooksReportsWhichAreAbsent(t *testing.T) {
 	out, _ := MergeHooks([]byte("{}"), hook)
 	missing, _ := MissingHooks(out, "/elsewhere/reright-hook")
-	if len(missing) != 4 {
+	if len(missing) != 5 {
 		t.Fatalf("missing %v", missing)
 	}
 	partial := `{"hooks": {"PreToolUse": [{"matcher": "*", "hooks": [{"type": "command", "command": "` + hook + ` pre"}]}]}}`
 	missing, _ = MissingHooks([]byte(partial), hook)
-	if len(missing) != 3 || !strings.Contains(missing[0], "PostToolUse") || missing[2] != "Stop (stop)" {
+	if len(missing) != 4 || !strings.Contains(missing[0], "PostToolUse") || missing[2] != "Stop (stop)" || missing[3] != "SubagentStop (stop)" {
 		t.Fatalf("missing %v", missing)
 	}
 }

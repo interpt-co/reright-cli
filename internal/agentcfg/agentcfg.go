@@ -85,6 +85,7 @@ var ClaudeHooks = []ClaudeHook{
 	{"PostToolUse", ClaudePostMatcher, "post", postTimeoutSec},
 	{"UserPromptSubmit", "", "prompt", postTimeoutSec},
 	{"Stop", "", "stop", postTimeoutSec},
+	{"SubagentStop", "", "stop", postTimeoutSec},
 }
 
 // ClaudePostMatcher picks the reright MCP tools the post hook watches.

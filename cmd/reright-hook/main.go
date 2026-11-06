@@ -52,9 +52,11 @@ func main() {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	stateDir := filepath.Join(home, ".local", "state", "reright")
+	checker := hookcli.HTTPChecker{BaseURL: url, Token: token, Version: version, Policy: hookcli.WritePolicy(stateDir)}
 	code := hookcli.RunAgent(ctx, agent, sub, os.Stdin, os.Stdout, os.Stderr, hookcli.Env{
 		StateDir:   stateDir,
-		Checker:    hookcli.HTTPChecker{BaseURL: url, Token: token, Version: version, Policy: hookcli.WritePolicy(stateDir)},
+		Checker:    checker,
+		Status:     checker,
 		Getenv:     os.Getenv,
 		ConfigDir:  cfgDir,
 		Version:    version,

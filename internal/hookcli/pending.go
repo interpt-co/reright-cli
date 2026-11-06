@@ -1,6 +1,7 @@
 package hookcli
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -110,7 +111,7 @@ func recordWait(in call, env Env) error {
 
 // stopCheck decides whether the agent may end its turn. block is the reason to keep it going, note a line
 // for the person about drafts reright stopped waiting for. Every error lets the agent stop.
-func stopCheck(c call, decodeErr error, env Env) (block, note string) {
+func stopCheck(ctx context.Context, c call, decodeErr error, env Env) (block, note string) {
 	defer func() {
 		if recover() != nil {
 			block, note = "", ""
@@ -126,10 +127,10 @@ func stopCheck(c call, decodeErr error, env Env) (block, note string) {
 	}
 	now := env.now()
 	var live, old []pendingDraft
-	dropped := false
+	changed := false
 	for _, d := range st.Drafts {
 		if seenRejected(env.StateDir, c, d.ID) {
-			dropped = true // rejected, so resolved, even when another agent of the session saw it
+			changed = true // rejected, so resolved, even when another agent of the session saw it
 			continue
 		}
 		if now.Sub(d.SubmittedAt) < pendingCap {
@@ -138,38 +139,111 @@ func stopCheck(c call, decodeErr error, env Env) (block, note string) {
 			old = append(old, d)
 		}
 	}
-	if len(old) > 0 || dropped {
+	var notes []string
+	if len(old) > 0 {
+		changed = true
+		notes = append(notes, staleNote(old))
+	}
+	live, approved, resolved := askServer(ctx, c, env, live)
+	if resolved != "" {
+		changed = true
+		notes = append(notes, resolved)
+	}
+	if changed {
 		st.Drafts = live
 		if savePending(path, st) != nil {
 			return "", ""
 		}
 	}
-	if len(old) > 0 {
-		note = staleNote(old)
+	waiting := live[:0:0]
+	for _, d := range live {
+		if !approved[d.ID] {
+			waiting = append(waiting, d)
+		}
 	}
 	if len(live) == 0 {
-		return "", note
+		return "", strings.Join(notes, " ")
 	}
 	// An agent under a reject lock was told to stop and wait for the user, so it may end its turn. The
 	// person still sees which drafts are open.
 	if _, err := os.Stat(lockPath(env.StateDir, c)); err == nil {
-		return "", joinNotes(note, lockedNote(live))
+		notes = append(notes, lockedNote(live))
+		return "", strings.Join(notes, " ")
 	}
-	return blockReason(live), note
+	return blockReason(waiting, live, approved), strings.Join(notes, " ")
 }
 
-func blockReason(live []pendingDraft) string {
-	if len(live) == 1 {
-		id := live[0].ID
-		return fmt.Sprintf("reright: still waiting for review (id %s). Don't end your turn: call rewrite_result(id %s) until approved/rejected.", id, id)
+// askServer resolves the caller's pending drafts with the server, so a rejection needs no call from the
+// agent. A rejection locks the caller the same way a fetched one does. It returns the drafts still to wait
+// for, the ones among them the server approved (the agent still has to fetch final_text), and a note for
+// the person about the ones it dropped. When the server cannot answer, nothing changes.
+func askServer(ctx context.Context, c call, env Env, live []pendingDraft) (keep []pendingDraft, approved map[string]bool, note string) {
+	approved = map[string]bool{}
+	if env.Status == nil || len(live) == 0 {
+		return live, approved, ""
 	}
 	ids := make([]string, len(live))
-	calls := make([]string, len(live))
 	for i, d := range live {
 		ids[i] = d.ID
-		calls[i] = "rewrite_result(id " + d.ID + ")"
 	}
-	return fmt.Sprintf("reright: still waiting for review (ids %s). Don't end your turn: call %s until approved/rejected.", strings.Join(ids, ", "), strings.Join(calls, ", "))
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	status, err := env.Status.Statuses(ctx, ids)
+	if err != nil {
+		return live, approved, ""
+	}
+	var rejected, gone []string
+	for _, d := range live {
+		switch status[d.ID] {
+		case "", "pending", "unknown":
+			// unknown: the token's account does not know the id, so the agent's own fetch decides
+			keep = append(keep, d)
+		case "approved":
+			keep = append(keep, d)
+			approved[d.ID] = true
+		case "rejected":
+			if markRejected(env.StateDir, c, d.ID, env.now()) {
+				addToLock(env.StateDir, c, d.ID, "")
+				rejected = append(rejected, d.ID)
+			}
+		default:
+			gone = append(gone, d.ID+" ("+status[d.ID]+")")
+		}
+	}
+	var notes []string
+	if len(rejected) > 0 {
+		what := "draft "
+		if len(rejected) > 1 {
+			what = "drafts "
+		}
+		notes = append(notes, "reright: the reviewer rejected "+what+idList(rejected)+". The agent must not use or resend it.")
+	}
+	if len(gone) > 0 {
+		notes = append(notes, "reright: no longer waiting for review on "+idList(gone)+".")
+	}
+	return keep, approved, strings.Join(notes, " ")
+}
+
+func blockReason(waiting, live []pendingDraft, approved map[string]bool) string {
+	var parts []string
+	if len(waiting) == 1 {
+		id := waiting[0].ID
+		parts = append(parts, fmt.Sprintf("reright: still waiting for review (id %s). Don't end your turn: call rewrite_result(id %s) until approved/rejected.", id, id))
+	} else if len(waiting) > 1 {
+		ids := make([]string, len(waiting))
+		calls := make([]string, len(waiting))
+		for i, d := range waiting {
+			ids[i] = d.ID
+			calls[i] = "rewrite_result(id " + d.ID + ")"
+		}
+		parts = append(parts, fmt.Sprintf("reright: still waiting for review (ids %s). Don't end your turn: call %s until approved/rejected.", strings.Join(ids, ", "), strings.Join(calls, ", ")))
+	}
+	for _, d := range live {
+		if approved[d.ID] {
+			parts = append(parts, fmt.Sprintf("reright: draft %s was approved. Call rewrite_result(id %s) to get final_text before you end your turn.", d.ID, d.ID))
+		}
+	}
+	return strings.Join(parts, " ")
 }
 
 func lockedNote(live []pendingDraft) string {

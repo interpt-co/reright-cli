@@ -52,7 +52,7 @@ Only files under your home directory. Repo-level files are never written, becaus
 
 | Part | Where |
 |---|---|
-| Hooks | `~/.claude/settings.json`: PreToolUse, PostToolUse, UserPromptSubmit and Stop, see `hook.md` |
+| Hooks | `~/.claude/settings.json`: PreToolUse, PostToolUse, UserPromptSubmit, Stop and SubagentStop, see `hook.md` |
 | MCP server | `claude mcp add --scope user --transport http reright URL/mcp --header "Authorization: Bearer TOKEN"` |
 | Rule text | `~/.claude/CLAUDE.md`, between `<!-- reright:start -->` and `<!-- reright:end -->` |
 

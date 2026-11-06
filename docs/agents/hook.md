@@ -1,6 +1,6 @@
 # The hook
 
-`reright-hook` runs from Claude Code's hooks. It is the only agent it supports. The installer writes four entries into `~/.claude/settings.json`, and the Claude Code plugin ships the same four in `dist/plugin/hooks/hooks.json`:
+`reright-hook` runs from Claude Code's hooks. It is the only agent it supports. The installer writes five entries into `~/.claude/settings.json`, and the Claude Code plugin ships the same five in `dist/plugin/hooks/hooks.json`:
 
 | Event | Command | What it does |
 |---|---|---|
@@ -8,6 +8,7 @@
 | PostToolUse on the reright tools | `reright-hook post` | Records a pending rewrite, and sets the reject lock when the result is `rejected`. |
 | UserPromptSubmit | `reright-hook prompt` | Clears the reject locks of the session, subagents included, and shows the update notice. |
 | Stop | `reright-hook stop` | Keeps the agent from stopping while a rewrite it started is still pending, unless it is under a reject lock. |
+| SubagentStop | `reright-hook stop` | The same check for a subagent, on the drafts that subagent sent. |
 
 The PostToolUse matcher is `mcp__reright__(rewrite|rewrite_result)`, with `plugin_reright_` before `reright` for the plugin. `rewrite` sends the text and can come back pending, approved or rejected. `rewrite_result` waits on the id while it is pending. Self-heal replaces an older matcher with this one.
 
@@ -43,6 +44,7 @@ Everything else is let through. That includes text that reaches git or gh throug
 - Locks and pending lists belong to one agent. A call from a subagent carries `agent_id`, and its lock and pending list sit in a folder of their own next to the main thread's. A rejection seen by one subagent locks that subagent only, and the Stop hook of the main thread lists only the drafts the main thread sent.
 - A reject lock still lets through `rewrite_result`, `SendMessage`, `AskUserQuestion` and `TaskStop`, which get the usual checks. The agent can check its other drafts, tell the user or other agents, and end its turn. `rewrite`, `keep_original` and every other tool stay blocked, so the rejected text cannot be sent again or used.
 - The hook remembers, per session, each draft it has seen rejected, for seven days. Seeing the same rejection again arms no lock, and a batch of rejections makes one lock that names them all. A draft seen rejected counts as resolved, so the Stop hook stops asking for it.
+- Before it blocks, the Stop check asks the server where the agent's pending drafts stand, with `GET /api/drafts/status?ids=` and the device token. The answer holds only ids and statuses, for the token's own account, and an id the account does not own reads as `unknown`. A rejected draft is resolved there and then: the hook arms the agent's lock, tells the person, and lets the agent stop, so the agent never has to fetch it. An expired draft is dropped with a note. An approved one keeps the agent going until it fetches `final_text`. When the server cannot answer, the check works from what the agent fetched.
 - `reright-hook` gives itself 20 seconds. The PreToolUse entry has a 30 second timeout, so reright's own deny comes first.
 - An agent may not change the switches: a shell call that runs `reright disable` or `reright enable`, or names `enforcement.json`, is denied even with every check off. See `switches.md`.
 

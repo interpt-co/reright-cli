@@ -113,6 +113,10 @@ func TestClaudeStopsOnlyWhenNothingIsPending(t *testing.T) {
 	if len(stop) != 1 || stop[0].Hooks[0].Command != "/home/u/.local/bin/reright-hook stop" {
 		t.Fatalf("Stop = %+v", stop)
 	}
+	sub := cfg.Hooks["SubagentStop"]
+	if len(sub) != 1 || sub[0].Hooks[0].Command != "/home/u/.local/bin/reright-hook stop" {
+		t.Fatalf("SubagentStop = %+v", sub)
+	}
 	post := cfg.Hooks["PostToolUse"]
 	if len(post) != 1 || post[0].Matcher != "mcp__reright__(rewrite|rewrite_result)" {
 		t.Fatalf("PostToolUse = %+v", post)

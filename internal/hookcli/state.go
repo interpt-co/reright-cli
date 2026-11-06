@@ -119,16 +119,9 @@ func writeAtomic(path string, b []byte) error {
 
 func lockMessage(l lock) string {
 	ids := l.ids()
-	shown := ids
-	if len(shown) > 3 {
-		shown = shown[:3]
-	}
-	what := "draft " + strings.Join(shown, ", ")
+	what := "draft " + idList(ids)
 	if len(ids) > 1 {
-		what = "drafts " + strings.Join(shown, ", ")
-	}
-	if more := len(ids) - len(shown); more > 0 {
-		what += fmt.Sprintf(" and %d more", more)
+		what = "drafts " + idList(ids)
 	}
 	reason := ""
 	if l.Reason != "" {
@@ -195,4 +188,17 @@ func pruneRejected(base string, now time.Time) {
 			os.Remove(dir)
 		}
 	}
+}
+
+// idList names up to three ids and counts the rest.
+func idList(ids []string) string {
+	shown := ids
+	if len(shown) > 3 {
+		shown = shown[:3]
+	}
+	out := strings.Join(shown, ", ")
+	if more := len(ids) - len(shown); more > 0 {
+		out += fmt.Sprintf(" and %d more", more)
+	}
+	return out
 }
