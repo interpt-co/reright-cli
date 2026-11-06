@@ -14,7 +14,9 @@ const AgentClaude = "claude"
 
 // call is a hook event reduced to what the checks need.
 type call struct {
-	Session  string
+	Session string
+	// Agent is the subagent id. Claude Code sends it only for calls made inside a subagent.
+	Agent    string
 	Cwd      string
 	Tool     string
 	Input    json.RawMessage
@@ -77,7 +79,7 @@ func decodeClaude(raw []byte) (call, error) {
 		return call{}, err
 	}
 	return call{
-		Session: str(m, "session_id"), Cwd: str(m, "cwd"), Tool: str(m, "tool_name"),
+		Session: str(m, "session_id"), Agent: str(m, "agent_id"), Cwd: str(m, "cwd"), Tool: str(m, "tool_name"),
 		Input: m["tool_input"], Response: m["tool_response"],
 	}, nil
 }

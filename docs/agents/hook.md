@@ -4,10 +4,10 @@
 
 | Event | Command | What it does |
 |---|---|---|
-| PreToolUse, matcher `*` | `reright-hook pre` | Blocks a tool call whose text did not come back from reright, and every call after a reject. |
+| PreToolUse, matcher `*` | `reright-hook pre` | Blocks a tool call whose text did not come back from reright, and almost every call after a reject (see below). |
 | PostToolUse on the reright tools | `reright-hook post` | Records a pending rewrite, and sets the reject lock when the result is `rejected`. |
-| UserPromptSubmit | `reright-hook prompt` | Clears the reject lock and shows the update notice. |
-| Stop | `reright-hook stop` | Keeps the agent from stopping while a rewrite it started is still pending. |
+| UserPromptSubmit | `reright-hook prompt` | Clears the reject locks of the session, subagents included, and shows the update notice. |
+| Stop | `reright-hook stop` | Keeps the agent from stopping while a rewrite it started is still pending, unless it is under a reject lock. |
 
 The PostToolUse matcher is `mcp__reright__(rewrite|rewrite_result)`, with `plugin_reright_` before `reright` for the plugin. `rewrite` sends the text and can come back pending, approved or rejected. `rewrite_result` waits on the id while it is pending. Self-heal replaces an older matcher with this one.
 
@@ -40,6 +40,9 @@ Everything else is let through. That includes text that reaches git or gh throug
 - Unparseable hook input, a checker error, a checker timeout, a panic and an unreadable lock file all deny the call. `RERIGHT_OFFLINE=allow` turns a checker error into an allow. `RERIGHT_BYPASS=1` in the hook's environment skips the text checks.
 - The post hook locks a session only when the tool is one of reright's own (server `reright`, or `plugin_<marketplace>_reright`). A result from another tool that contains `{"status":"rejected"}` is ignored.
 - Lock files are named by a hash of the session id. A payload without a session id uses a lock keyed by its working directory.
+- Locks and pending lists belong to one agent. A call from a subagent carries `agent_id`, and its lock and pending list sit in a folder of their own next to the main thread's. A rejection seen by one subagent locks that subagent only, and the Stop hook of the main thread lists only the drafts the main thread sent.
+- A reject lock still lets through `rewrite_result`, `SendMessage`, `AskUserQuestion` and `TaskStop`, which get the usual checks. The agent can check its other drafts, tell the user or other agents, and end its turn. `rewrite`, `keep_original` and every other tool stay blocked, so the rejected text cannot be sent again or used.
+- The hook remembers, per session, each draft it has seen rejected, for seven days. Seeing the same rejection again arms no lock, and a batch of rejections makes one lock that names them all. A draft seen rejected counts as resolved, so the Stop hook stops asking for it.
 - `reright-hook` gives itself 20 seconds. The PreToolUse entry has a 30 second timeout, so reright's own deny comes first.
 - An agent may not change the switches: a shell call that runs `reright disable` or `reright enable`, or names `enforcement.json`, is denied even with every check off. See `switches.md`.
 

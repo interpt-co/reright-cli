@@ -25,10 +25,6 @@ type pendingState struct {
 	Drafts []pendingDraft `json:"drafts"`
 }
 
-func pendingPath(stateDir string, c call) string {
-	return filepath.Join(stateDir, "pending", filepath.Base(lockPath(stateDir, c)))
-}
-
 func (env Env) now() time.Time {
 	if env.Now != nil {
 		return env.Now()
@@ -130,24 +126,36 @@ func stopCheck(c call, decodeErr error, env Env) (block, note string) {
 	}
 	now := env.now()
 	var live, old []pendingDraft
+	dropped := false
 	for _, d := range st.Drafts {
+		if seenRejected(env.StateDir, c, d.ID) {
+			dropped = true // rejected, so resolved, even when another agent of the session saw it
+			continue
+		}
 		if now.Sub(d.SubmittedAt) < pendingCap {
 			live = append(live, d)
 		} else {
 			old = append(old, d)
 		}
 	}
-	if len(old) > 0 {
+	if len(old) > 0 || dropped {
 		st.Drafts = live
 		if savePending(path, st) != nil {
 			return "", ""
 		}
+	}
+	if len(old) > 0 {
 		note = staleNote(old)
 	}
-	if len(live) > 0 {
-		block = blockReason(live)
+	if len(live) == 0 {
+		return "", note
 	}
-	return block, note
+	// An agent under a reject lock was told to stop and wait for the user, so it may end its turn. The
+	// person still sees which drafts are open.
+	if _, err := os.Stat(lockPath(env.StateDir, c)); err == nil {
+		return "", joinNotes(note, lockedNote(live))
+	}
+	return blockReason(live), note
 }
 
 func blockReason(live []pendingDraft) string {
@@ -162,6 +170,24 @@ func blockReason(live []pendingDraft) string {
 		calls[i] = "rewrite_result(id " + d.ID + ")"
 	}
 	return fmt.Sprintf("reright: still waiting for review (ids %s). Don't end your turn: call %s until approved/rejected.", strings.Join(ids, ", "), strings.Join(calls, ", "))
+}
+
+func lockedNote(live []pendingDraft) string {
+	ids := make([]string, len(live))
+	for i, d := range live {
+		ids[i] = d.ID
+	}
+	if len(ids) == 1 {
+		return "reright: the agent stopped after a rejection. Draft " + ids[0] + " is still waiting for review."
+	}
+	return "reright: the agent stopped after a rejection. Drafts " + strings.Join(ids, ", ") + " are still waiting for review."
+}
+
+func joinNotes(a, b string) string {
+	if a == "" {
+		return b
+	}
+	return a + " " + b
 }
 
 func staleNote(old []pendingDraft) string {

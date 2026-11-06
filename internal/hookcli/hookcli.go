@@ -3,8 +3,6 @@ package hookcli
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,7 +10,6 @@ import (
 	"io/fs"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -47,11 +44,6 @@ type Env struct {
 	// Heal brings the Claude Code hook settings up to date after an upgrade. Nil means no healing. It runs
 	// after the decision is written, and its errors and panics are ignored.
 	Heal func()
-}
-
-type lock struct {
-	DraftID string `json:"draft_id"`
-	Reason  string `json:"reason"`
 }
 
 // Run executes one hook subcommand for Claude Code: pre (PreToolUse), post
@@ -105,7 +97,7 @@ func RunAgent(ctx context.Context, agent, sub string, stdin io.Reader, stdout, s
 		}
 	case "prompt":
 		if decodeErr == nil {
-			os.Remove(lockPath(env.StateDir, c))
+			clearLocks(env.StateDir, c)
 		}
 		if ad.notice != nil {
 			if n := updateNotice(ctx, env); n.User != "" {
@@ -140,18 +132,16 @@ func preReason(ctx context.Context, c call, decodeErr error, env Env) (reason st
 }
 
 func pre(ctx context.Context, in call, env Env) string {
-	b, err := os.ReadFile(lockPath(env.StateDir, in))
-	if err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return "reright: could not read this session's reject lock (" + err.Error() + "), so the call is blocked. Tell the user."
-	}
-	if err == nil {
-		var l lock
-		json.Unmarshal(b, &l)
-		reason := ""
-		if l.Reason != "" {
-			reason = " (reason: " + l.Reason + ")"
+	if !lockExempt(in.Tool) {
+		b, err := os.ReadFile(lockPath(env.StateDir, in))
+		if err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return "reright: could not read this agent's reject lock (" + err.Error() + "), so the call is blocked. Tell the user."
 		}
-		return fmt.Sprintf("reright: the reviewer rejected draft %s%s. Stop the current task. Do not retry, rephrase or work around it. Tell the user the text was rejected and wait for his instructions.", l.DraftID, reason)
+		if err == nil {
+			var l lock
+			json.Unmarshal(b, &l)
+			return lockMessage(l)
+		}
 	}
 	if reason := guardSwitches(in); reason != "" {
 		return reason
@@ -275,13 +265,11 @@ func post(in call, stderr io.Writer, env Env) {
 	if !found {
 		return
 	}
-	path := lockPath(env.StateDir, in)
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		fmt.Fprintln(stderr, "reright-hook:", err)
+	// A rejection the session has already seen was already reported, so seeing it again locks nothing.
+	if !markRejected(env.StateDir, in, id, env.now()) {
 		return
 	}
-	b, _ := json.Marshal(lock{DraftID: id, Reason: reason})
-	if err := os.WriteFile(path, b, 0o600); err != nil {
+	if err := addToLock(env.StateDir, in, id, reason); err != nil {
 		fmt.Fprintln(stderr, "reright-hook:", err)
 	}
 }
@@ -311,17 +299,3 @@ const (
 	rewriteTool       = "rewrite"
 	rewriteResultTool = "rewrite_result"
 )
-
-// lockPath names the lock file after a hash of the session id, so any id
-// length is safe. Without a session id the lock is per working directory, or
-// shared by all id-less sessions when there is no directory either. That can
-// block an unrelated id-less session after a reject, never the other way
-// round, and the next prompt clears it.
-func lockPath(stateDir string, c call) string {
-	key := "session:" + c.Session
-	if c.Session == "" {
-		key = "cwd:" + c.Cwd
-	}
-	sum := sha256.Sum256([]byte(key))
-	return filepath.Join(stateDir, "locks", hex.EncodeToString(sum[:16]))
-}
