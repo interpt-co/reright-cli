@@ -13,9 +13,11 @@
 // recent commit is the user's and the remote is not public. When git cannot answer, the repository counts
 // as shared, so the hook checks.
 //
-// The user is every user.email in git config (system, global and repository), every reright.email, and,
-// for a GitHub remote, the noreply address of the remote's owner. Bot authors ([bot] in the address) are
-// ignored.
+// The user is every user.email in git config (system, global and repository) and every reright.email. A
+// GitHub noreply address (123+login@users.noreply.github.com) is the user when its login is the account gh
+// is signed in to, or when reright.email lists a noreply address with that login. Without gh there is no
+// such match, so a repository with someone's noreply commits counts as shared. Bot authors ([bot] in the
+// address) are ignored.
 package audience
 
 import (
@@ -42,6 +44,8 @@ type Detector struct {
 	// Public reports whether a hosted remote can be read without signing in. Nil means never public.
 	// An error makes the repository count as shared.
 	Public func(ctx context.Context, r Remote) (bool, error)
+	// GitHubLogins returns the GitHub logins the user is signed in to with gh. Nil means none.
+	GitHubLogins func(ctx context.Context) []string
 }
 
 // Remote is a hosted remote, parsed from its URL.
@@ -98,22 +102,32 @@ func (d Detector) Decide(ctx context.Context, dir string) Decision {
 			}
 		}
 	}
-	owners := map[string]bool{}
-	for _, r := range remotes {
-		if r.Host == "github.com" {
-			if owner, _, ok := strings.Cut(r.Path, "/"); ok {
-				owners[strings.ToLower(owner)] = true
-			}
+	logins := map[string]bool{}
+	for e := range me {
+		if l := noreplyLogin(e); l != "" {
+			logins[l] = true
 		}
 	}
+	ghAsked := false
 	log, err := d.git(ctx, dir, "log", "--all", "-n", strconv.Itoa(Commits), "--format=%aE")
 	if err != nil {
 		return Decision{true, "git could not read the history"}
 	}
 	for _, e := range strings.Split(log, "\n") {
 		e = strings.ToLower(strings.TrimSpace(e))
-		if e == "" || me[e] || strings.Contains(e, "[bot]") || owners[noreplyLogin(e)] {
+		if e == "" || me[e] || strings.Contains(e, "[bot]") {
 			continue
+		}
+		if l := noreplyLogin(e); l != "" {
+			if !ghAsked && d.GitHubLogins != nil {
+				ghAsked = true
+				for _, g := range d.GitHubLogins(ctx) {
+					logins[strings.ToLower(g)] = true
+				}
+			}
+			if logins[l] {
+				continue
+			}
 		}
 		return Decision{true, "commits by " + e + " are in its recent history"}
 	}

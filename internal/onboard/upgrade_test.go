@@ -33,7 +33,16 @@ type upgradeWorld struct {
 // newUpgradeWorld serves a signed release at the given version and installs "old" programs in a temp home.
 func newUpgradeWorld(t *testing.T, latest string) *upgradeWorld {
 	t.Helper()
-	w := &upgradeWorld{t: t, home: t.TempDir(), cliNew: []byte("new reright " + latest), hookNew: []byte("new hook " + latest)}
+	return newUpgradeWorldWithHook(t, latest, nil)
+}
+
+// newUpgradeWorldWithHook is newUpgradeWorld with the hook program the release carries. Nil means a placeholder.
+func newUpgradeWorldWithHook(t *testing.T, latest string, hookNew []byte) *upgradeWorld {
+	t.Helper()
+	if hookNew == nil {
+		hookNew = []byte("new hook " + latest)
+	}
+	w := &upgradeWorld{t: t, home: t.TempDir(), cliNew: []byte("new reright " + latest), hookNew: hookNew}
 	t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(w.home, ".gitconfig"))
 	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
 	pub, priv, err := ed25519.GenerateKey(nil)
@@ -358,5 +367,18 @@ func TestUpgradeLeavesSomeoneElsesHooksPath(t *testing.T) {
 	}
 	if !strings.Contains(w.out(), filepath.Join(theirs, "commit-msg")) {
 		t.Fatalf("the hand-added line is not listed:\n%s", w.out())
+	}
+}
+
+// reright upgrade runs the new hook with "heal", so the hook it just installed writes its own rules text.
+func TestUpgradeRunsTheNewHookHeal(t *testing.T) {
+	mark := filepath.Join(t.TempDir(), "args")
+	hook := []byte("#!/bin/sh\necho \"$@\" >> '" + mark + "'\necho 'reright-hook v0.1.2 (linux/amd64)'\n")
+	w := newUpgradeWorldWithHook(t, "v0.1.2", hook)
+	if err := Upgrade(context.Background(), w.opts); err != nil {
+		t.Fatal(err)
+	}
+	if got := w.read(mark); !strings.Contains(got, "heal\n") {
+		t.Fatalf("the new hook was run with %q, want heal", got)
 	}
 }

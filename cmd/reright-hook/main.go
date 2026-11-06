@@ -61,7 +61,8 @@ func main() {
 		ReleaseURL: os.Getenv("RERIGHT_RELEASE_URL"),
 		Heal:       func() { onboard.HealClaudeHooks(home, stateDir, os.Getenv, time.Now()) },
 		Audience: audience.Detector{
-			Public: audience.HostingProbe{Dir: filepath.Join(stateDir, "public")}.Public,
+			Public:       audience.HostingProbe{Dir: filepath.Join(stateDir, "public")}.Public,
+			GitHubLogins: audience.GHAccount{Home: home, CacheDir: filepath.Join(stateDir, "public")}.Logins,
 		}.Decide,
 	})
 	cancel()

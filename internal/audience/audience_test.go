@@ -176,15 +176,55 @@ func TestMailmapIsApplied(t *testing.T) {
 	wantShared(t, decide(t, dir), false)
 }
 
-func TestGitHubNoreplyOfTheRemoteOwnerIsTheUser(t *testing.T) {
+// A noreply address is the user only when gh is signed in to that login or reright.email lists it. The
+// owner of the remote proves nothing: a clone of a colleague's repository has the colleague as owner.
+func TestGitHubNoreplyIsTheUserOnlyThroughGhOrRerightEmail(t *testing.T) {
 	isolate(t)
 	dir := newRepo(t)
 	commit(t, dir, "")
 	commit(t, dir, "1234+Paro@users.noreply.github.com") // a commit made in the GitHub web editor
 	run(t, dir, "remote", "add", "origin", "https://github.com/paro/tool")
-	wantShared(t, decide(t, dir), false)
+	ctx := context.Background()
+	// the remote owner's noreply is not enough, and without gh there is no match
+	wantShared(t, Detector{}.Decide(ctx, dir), true)
+	wantShared(t, Detector{GitHubLogins: func(context.Context) []string { return nil }}.Decide(ctx, dir), true)
+	// gh signed in to another account: still shared
+	other := Detector{GitHubLogins: func(context.Context) []string { return []string{"colleague"} }}
+	wantShared(t, other.Decide(ctx, dir), true)
+	// gh signed in to paro: the user's own
+	asked := 0
+	mine := Detector{GitHubLogins: func(context.Context) []string { asked++; return []string{"Paro"} }}
+	wantShared(t, mine.Decide(ctx, dir), false)
 	commit(t, dir, "999+someone@users.noreply.github.com")
-	wantShared(t, decide(t, dir), true)
+	wantShared(t, mine.Decide(ctx, dir), true)
+	if asked != 2 {
+		t.Errorf("gh asked %d times for two decisions", asked)
+	}
+}
+
+func TestGhIsNotAskedWithoutNoreplyCommits(t *testing.T) {
+	isolate(t)
+	dir := newRepo(t)
+	commit(t, dir, "")
+	commit(t, dir, "colleague@example.com")
+	run(t, dir, "remote", "add", "origin", "git@github.com:team/app.git")
+	asked := false
+	d := Detector{GitHubLogins: func(context.Context) []string { asked = true; return nil }}
+	wantShared(t, d.Decide(context.Background(), dir), true)
+	if asked {
+		t.Error("asked gh about a history with no noreply address")
+	}
+}
+
+func TestNoreplyListedInRerightEmailMatchesAnyIDForm(t *testing.T) {
+	isolate(t)
+	dir := newRepo(t)
+	commit(t, dir, "")
+	commit(t, dir, "1234+paro@users.noreply.github.com")
+	commit(t, dir, "paro@users.noreply.github.com")
+	run(t, dir, "remote", "add", "origin", "https://github.com/team/tool")
+	run(t, dir, "config", "--global", "--add", "reright.email", "1234+paro@users.noreply.github.com")
+	wantShared(t, decide(t, dir), false)
 }
 
 func TestOverride(t *testing.T) {
